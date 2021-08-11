@@ -1,0 +1,943 @@
+---
+title: "CAMP validation"
+author: "PKachroo, reprk, Channing Lab, BWH"
+date: "08/11/2021"
+output:
+  html_document:
+    code_folding: hide 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=TRUE, echo=TRUE}
+
+rm(list=ls())
+#options(mc.cores=5)
+system("hostname")
+print(Sys.Date())
+print(Sys.time())
+
+setwd("/udd/reprk/projects/PartnersBiobank_asthma_metabolomics/scripts")
+
+libs <- c("R.utils", "moments", "gdata", "gplots", "grid", "foreign", "ggplot2", "MASS", "Hmisc", "reshape2", "lme4", "dplyr", "magrittr", "stringr", "gridExtra", "lattice", "data.table", "tidyverse", "scales", "harrypotter", "e1071", "DT", "readxl", "knitr", "ggpubr")
+
+for (l in libs) {
+  if (require(l, character.only = T)) {
+    print(paste0(l, " loaded successfully"))
+  } else {
+    install.packages(l)
+    require(l, character.only = T)
+    print(paste0(l, " installed and loaded successfully"))
+  }
+}
+
+# library needed for paretoscale, but this package does not seem to work with R v. 3.6.3: error: compilation failed for randomForest, so copied the function
+#library("RFmarkerDetector")
+
+paretoscale <- function(data, exclude = T) {
+    
+    if (exclude == T) {
+        # Here we extract numeric data and perform Pareto scaling
+        sample_classes <- data[, 1:2]
+        x <- data[, 3:dim(data)[2]]
+    } else {
+        sample_classes <- NULL
+        x <- data
+    }
+    # Here we perform centering
+    x.centered <- apply(x, 2, function(x) x - mean(x))
+    # Then we perform scaling on the mean-centered matrix
+    x.sc <- apply(x.centered, 2, function(x) x/sqrt(sd(x)))
+    x.sc <- cbind(sample_classes, x.sc)
+    
+}
+
+## Function to show summary stats and standard deviation together
+sig_digits <- 1
+sum_sd <- function(data, varname) {
+    eval(parse(text = str_c("data[, round(summary(", varname, "), digits=1)] %>% print()")))
+    eval(parse(text = str_c("print(str_c('SD: ', data[, sd(", varname, ", na.rm = T) %>% 
+                                round(sig_digits)]))")))
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# Save result files with timeStamp
+timeStamp <- as.character(round(unclass(Sys.time())))
+print(timeStamp)
+```
+
+# 1. Data locations
+## 1.1. Data Loading and prep
+
+```{r 1.1.load_dat}
+
+project.dir = "/udd/reprk/projects/PartnersBiobank_asthma_metabolomics"
+data.dir = file.path(project.dir, "data")
+results.dir = file.path(project.dir, "code_review/results")
+regeps.dir = "/proj/regeps/regep00/studies/CAMP"
+plots.dir = file.path(project.dir, "code_review/plots")
+
+# Rachel did QC and created the file
+
+metabQC <- read.csv(file.path(regeps.dir, "data/metabolomics/Metabolite\ Profiling/CAMP_mets_named_nodup_501_processed.csv"),
+                    as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+
+metabinfo <- read.csv(file.path(regeps.dir,
+                               "data/metabolomics/Metabolite Profiling/CAMP_named_mets_info_nodup_501_processed.csv"),
+                     as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+
+# Rachel created this file from:
+#/proj/regeps/regep00/studies/CAMP/analyses/hprke/CAMP_SAmple_Information_FINAL_Nov17.R
+CAMPpheno <- read.csv(file.path(regeps.dir, "data/metabolomics/Sample_Info/camp_serum_details.csv"),
+                      as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+
+names<-read.csv(file.path(regeps.dir, "data/metabolomics/Metabolite Profiling/known_camp_mets_passedQC.csv"))
+
+# so far the latest pheno file
+camp_pheno <- read.csv(file=file.path(regeps.dir, "data/phenotype/camp_pheno_0421.csv"),
+                       as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+```
+
+# 2. Validation CAMP data
+
+```{r 2.camp validation data prep, warning=FALSE}
+
+##############################
+# Validation in CAMP
+##############################
+# data wrangling
+dim(metabQC);metabQC[1:4,1:4]
+rownames(metabQC) <- metabQC$SampleID
+metabQC$SampleID <- NULL
+rownames(metabQC) <- gsub(".", '-', rownames(metabQC), fixed = T)
+metabQC_t <- t(metabQC)
+
+metabinfo[1:4,1:4]
+rownames(metabinfo) <- metabinfo$metabid
+
+CAMPmetabs <- merge(metabQC_t, metabinfo, by="row.names", sort=FALSE)
+rownames(CAMPmetabs) <- CAMPmetabs$Row.names
+CAMPmetabs$Row.names <- NULL
+dim(CAMPmetabs)
+
+CAMPmetabs_summary <- CAMPmetabs[,1424:1443]
+CAMPmetabs_t <- CAMPmetabs[ -c(1424:1443) ]
+CAMPmetabs <- t(CAMPmetabs_t)
+dim(CAMPmetabs)
+CAMPmetabs[1:4,1:4];CAMPmetabs[1:4,500:501]
+
+# take end time point
+table(CAMPpheno$sample_timepoint)
+
+###############
+# End point
+###############
+CAMP_phend <- CAMPpheno[CAMPpheno$sample_timepoint=="end",]
+
+#Treatment/ICS randomization variable TG: 1=budesonide, 2=nedocramil, 3=placebo
+table(CAMP_phend$TG)
+
+# Get subjects only with end time point (F48)
+# 566 subjects and 563 named metabs out of all 19,728 metabolites
+CAMPdata_end <- CAMPmetabs[ rownames(CAMPmetabs) %in% CAMP_phend$SampleID, ]
+
+#Model 1: Linear regression with metabolite as the outcome, Budenoside vs ned + placebo
+# CAMP should have no smokers and all asthmatics
+CAMP_phend$Steroid_binary=ifelse(CAMP_phend$TG==1,1,0)
+CAMP_phend$Steroid_binary <- as.factor(CAMP_phend$Steroid_binary)
+
+###############
+# take baseline
+###############
+table(CAMPpheno$sample_timepoint)
+
+CAMP_baseline <- CAMPpheno[CAMPpheno$sample_timepoint=="baseline",]
+
+#Treatment group TG: 1=bud, 2=ned, 3=plbo
+table(CAMP_baseline$TG)
+
+CAMP_baseline$Steroid_binary=ifelse(CAMP_baseline$TG==1,1,0)
+CAMP_baseline$Steroid_binary <- as.factor(CAMP_baseline$Steroid_binary)
+
+CAMPdata_baseline <- CAMPmetabs[ rownames(CAMPmetabs) %in% CAMP_baseline$SampleID, ]
+dim(CAMPdata_baseline) # 560
+
+setdiff(CAMP_phend$S_SUBJECTID, CAMP_baseline$S_SUBJECTID)
+rem <- setdiff(CAMP_phend$S_SUBJECTID, CAMP_baseline$S_SUBJECTID)
+
+# remove 6 subjects with no data at baseline
+CAMP_phend.b <- CAMP_phend[!(CAMP_phend$S_SUBJECTID %in% rem),]
+
+# repeat above step to get end time point data for only those 560 subjects
+CAMPdata_end_merge <- merge(CAMP_phend.b, CAMPdata_end, by.x="SampleID", by.y="row.names", sort=F)
+
+# Get baseline data for those 560 subjects
+CAMPdata_baseline_merge <- merge(CAMP_baseline, CAMPdata_baseline, by.x="SampleID", by.y="row.names", sort=F)
+
+# Within CAMP subjects at end point, stratify by ICS use i.e in subjects taking budenoside:
+# Identify whether those with exacerbation have lower metabolite levels compared to those who don't
+CAMP.phfi.end <- merge(CAMP_phend.b, camp_pheno, by="camp", sort=F)
+CAMPdata_end_merge <- merge(CAMP.phfi.end, CAMPdata_end, by.x="SampleID", by.y="row.names", sort=F)
+
+CAMP.phfi.base <- merge(CAMP_baseline, camp_pheno, by="camp", sort=F)
+CAMP.phfi.base <- data.frame(CAMP.phfi.base)
+CAMPdata_baseline_merge <- merge(CAMP.phfi.base, CAMPdata_baseline, by.x="SampleID", by.y="row.names", sort=F)
+
+```
+
+# 3. Table 1 CAMP stats
+
+```{r 3.Table1, warning=FALSE}
+setDT(camp_pheno)
+setDT(CAMPdata_baseline_merge)
+setDT(CAMPdata_end_merge)
+
+# Overall for all 1,041 subjects
+sum_sd(camp_pheno, "age_s3")
+sum_sd(camp_pheno, "BMI_S3")
+sum_sd(camp_pheno, "PREFEVPP_S3")
+sum_sd(camp_pheno, "TOTEOS_S3")
+sum_sd(camp_pheno, "XTIGE_iuml_S3")
+sum_sd(camp_pheno, "PREFEVPP_F48")
+sum_sd(camp_pheno, "TOTEOS_F48")
+sum_sd(camp_pheno, "XTIGE_iuml_F48")
+
+# 1: males, 2:females
+camp_pheno[, .N, .(SEX)][, pct := (N/sum(N))*100] %>% print()
+# 1: whites, 2: AA, 3: Hispanics, 4: others
+camp_pheno[, .N, .(RACE)][, pct := (N/sum(N))*100] %>% print()
+#Treatment/ICS randomization variable TG: 1=bud, 2=ned, 3=plbo
+camp_pheno[, .N, .(TG)][, pct := (N/sum(N))*100] %>% print()
+
+#ERYES - emergency room visits
+camp_pheno[, .N, .(ERYES)][, pct := (N/sum(N))*100] %>% print()
+#Cumulative hospitalization at the end of follow up
+camp_pheno[, .N, .(bin_cum_edhos_f48)][, pct := (N/sum(N))*100] %>% print()
+#Hospitalization
+camp_pheno[, .N, .(HOSPYES)][, pct := (N/sum(N))*100] %>% print()
+
+# For baseline
+sum_sd(CAMPdata_baseline_merge, "age_at_sample")
+sum_sd(CAMPdata_baseline_merge, "BMI_S3")
+sum_sd(CAMPdata_baseline_merge, "PREFEVPP_S3")
+sum_sd(CAMPdata_baseline_merge, "TOTEOS_S3")
+sum_sd(CAMPdata_baseline_merge, "XTIGE_iuml_S3")
+
+CAMPdata_baseline_merge[, .N, .(SEX.x)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_baseline_merge[, .N, .(RACE.x)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_baseline_merge[, .N, .(TG.x)][, pct := (N/sum(N))*100] %>% print()
+#ERYES - emergency room visits
+CAMPdata_baseline_merge[, .N, .(ERYES)][, pct := (N/sum(N))*100] %>% print()
+#Hospitalization
+CAMPdata_baseline_merge[, .N, .(HOSPYES)][, pct := (N/sum(N))*100] %>% print()
+
+# for end point
+sum_sd(CAMPdata_end_merge, "age_at_sample") # same to age_f48
+sum_sd(CAMPdata_end_merge, "age_f48")
+sum_sd(CAMPdata_end_merge, "BMI_F48")
+sum_sd(CAMPdata_baseline_merge, "PREFEVPP_F48")
+sum_sd(CAMPdata_baseline_merge, "TOTEOS_F48")
+sum_sd(CAMPdata_baseline_merge, "XTIGE_iuml_F48")
+
+CAMPdata_end_merge[, .N, .(SEX.x)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(RACE.x)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(TG.x)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(SEX.x, RACE.x)][order(SEX.x, RACE.x)][, pct := (N/sum(N))*100] %>% print()
+#ERYES - emergency room visits
+CAMPdata_end_merge[, .N, .(ERYES)][, pct := (N/sum(N))*100] %>% print()
+#Cumulative hospitalization at the end of follow up
+CAMPdata_end_merge[, .N, .(bin_cum_edhos_f48)][, pct := (N/sum(N))*100] %>% print()
+#Hospitalization
+CAMPdata_end_merge[, .N, .(HOSPYES)][, pct := (N/sum(N))*100] %>% print()
+
+# t.test for age and bmi
+t.test(CAMPdata_baseline_merge$age_at_sample, CAMPdata_end_merge$age_f48)
+t.test(CAMPdata_baseline_merge$BMI_S3, CAMPdata_end_merge$BMI_F48)
+t.test(CAMPdata_baseline_merge$PREFEVPP_S3, CAMPdata_end_merge$PREFEVPP_F48)
+t.test(CAMPdata_baseline_merge$TOTEOS_S3, CAMPdata_end_merge$TOTEOS_F48)
+t.test(CAMPdata_baseline_merge$XTIGE_iuml_S3, CAMPdata_end_merge$XTIGE_iuml_F48)
+
+```
+
+# 4. CAMP Models baseline
+
+```{r 4.mod.base, warning=FALSE}
+
+###############
+# at baseline
+###############
+
+age <- as.numeric(CAMPdata_baseline_merge$age_at_sample)
+sex <- as.factor(CAMPdata_baseline_merge$SEX.x)
+race <- as.factor(CAMPdata_baseline_merge$RACE.x)
+bmi <- CAMPdata_baseline_merge$BMI_S3
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_baseline_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=2));kable(round(a.ci, digits=2))
+# cortisol: 
+# Estimate Std. Error t value Pr(>|t|)
+#Steroid_binary1      0.088554   0.234340   0.378  0.70567 
+# CIs: Steroid_binary1 -0.14055494  0.071440760
+
+# with height, estimates did not change much
+#Steroid_binary1      0.090070   0.234608   0.384    0.701
+# CIs: Steroid_binary1     -0.370803523  0.550943592
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_baseline_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=2));kable(round(a.ci, digits=2))
+# cortisone:
+# Estimate Std. Error t value Pr(>|t|)
+# Steroid_binary1      0.20802    0.25156   0.827  0.40866 
+# CIs: Steroid_binary1     -0.286154491  0.702187776
+
+# with height, estimates did not change much
+# Steroid_binary1      0.190532   0.249770   0.763 0.445905
+# CIs: Steroid_binary1     -0.300127587  0.68119100
+
+```
+
+# 5. CAMP Models end point - bud (low dose ICS randomization) and ned/plac
+
+```{r 5.mod.end.ics, warning=FALSE}
+
+###############
+# at end point
+###############
+
+age <- as.numeric(CAMPdata_end_merge$age_at_sample)
+sex <- as.factor(CAMPdata_end_merge$SEX.x)
+race <- as.factor(CAMPdata_end_merge$RACE.x)
+bmi <- CAMPdata_end_merge$BMI
+
+# Looking specifically at cortisol and cortisone, the replicated metabolites, 
+# try adding also either height or weight, does not change much, improves slightly though
+
+# Cortisol
+#lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_end_merge) %>% summary %>% coef
+#summary(cf.sev)
+#cf.sev %>% summary %>% coef
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+# Cortisol
+# Estimate Std. Error t value Pr(>|t|)
+#Steroid_binary1     -0.879263   0.321694  -2.733  0.00648 **
+# 95% CI if adjusted by height and weight: -1.205515456 -0.01655186
+
+# cortisone
+#summary(lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_end_merge))
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+# cortisone: 
+# Estimate Std. Error t value Pr(>|t|)
+#Steroid_binary1     -0.611034   0.302640  -2.019   0.0440 *
+# 95% CI if adjusted by height and weight: -1.51117178 -0.247353353
+
+CAMPbud <- CAMPdata_end_merge[CAMPdata_end_merge$Steroid_binary==1,]
+CAMPbud$cum.edhos.bin=ifelse(CAMPbud$cum_edhos_f48==0,0,1)
+CAMPbud$cum.edhos.bin <- as.factor(CAMPbud$cum.edhos.bin)
+
+# we used this variable as a proxy for exacerbation
+table(CAMPbud$cum.edhos.bin) # 111 without and 40 with exacerbation
+
+age <- as.numeric(CAMPbud$age_at_sample)
+sex <- as.factor(CAMPbud$SEX.x)
+race <- as.factor(CAMPbud$RACE.x)
+bmi <- CAMPbud$BMI
+
+# Cortisol
+summary(lm(hpos_QI120~cum.edhos.bin*age+age+sex+race+bmi, data=CAMPbud))
+
+# Cortisone
+summary(lm(hpos_QI121~cum.edhos.bin*age+age+sex+race+bmi, data=CAMPbud))
+
+# Do the same for subjects without ICS/budesonide use
+
+CAMPplacn <- CAMPdata_end_merge[CAMPdata_end_merge$Steroid_binary==0,]
+CAMPplacn$cum.edhos.bin=ifelse(CAMPplacn$cum_edhos_f48==0,0,1)
+CAMPplacn$cum.edhos.bin <- as.factor(CAMPplacn$cum.edhos.bin)
+table(CAMPplacn$cum.edhos.bin) # 264 without and 145 with exacerbation
+
+age <- as.numeric(CAMPplacn$age_at_sample)
+sex <- as.factor(CAMPplacn$SEX.x)
+race <- as.factor(CAMPplacn$RACE.x)
+bmi <- CAMPplacn$BMI
+
+# Cortisol
+summary(lm(hpos_QI120~cum.edhos.bin*age+age+sex+race+bmi, data=CAMPplacn))
+
+# Cortisone
+summary(lm(hpos_QI121~cum.edhos.bin*age+age+sex+race+bmi, data=CAMPplacn))
+
+a <- ggboxplot(CAMPbud, x = "cum.edhos.bin", y = "hpos_QI120",
+               color = "cum.edhos.bin", palette ="jco",ylim=c(-3,2),
+               add = "jitter", shape = "cum.edhos.bin", 
+  xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/Budenoside)",
+  ylab="Cortisol levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
+  annotate("text", label = "n = 111", x = 1, y = -2.9, color = "black") + 
+  annotate("text", label = "n = 40", x = 2, y = -2.9, color = "black") +
+  stat_compare_means(label.y = 1.8) + theme(legend.title = element_blank())
+
+b <- ggboxplot(CAMPbud, x = "cum.edhos.bin", y = "hpos_QI121",
+               color = "cum.edhos.bin", palette ="jco",ylim=c(-4,2),
+               add = "jitter", shape = "cum.edhos.bin", 
+ xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/Budenoside)",
+ ylab="Cortisone levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
+  annotate("text", label = "n = 111", x = 1, y = -3.9, color = "black") + 
+  annotate("text", label = "n = 40", x = 2, y = -3.9, color = "black") +
+  stat_compare_means(label.y = 1.8) + theme(legend.title = element_blank())
+
+c <- ggboxplot(CAMPplacn, x = "cum.edhos.bin", y = "hpos_QI120",
+               color = "cum.edhos.bin", palette ="jco",ylim=c(-3.5,2),
+               add = "jitter", shape = "cum.edhos.bin", 
+  xlab="Exacerbation based on cumulative hospitalizations\n(Subjects not on ICS/Plc-Ned)",
+  ylab="Cortisol levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
+  annotate("text", label = "n = 264", x = 1, y = -3.4, color = "black") + 
+  annotate("text", label = "n = 145", x = 2, y = -3.4, color = "black") +
+  stat_compare_means(label.y = 1.8) + theme(legend.title = element_blank())
+
+d <- ggboxplot(CAMPplacn, x = "cum.edhos.bin", y = "hpos_QI121",
+               color = "cum.edhos.bin", palette ="jco",ylim=c(-4.5,2),
+               add = "jitter", shape = "cum.edhos.bin", 
+  xlab="Exacerbation based on cumulative hospitalizations\n(Subjects not on ICS/Plc-Ned)",
+  ylab="Cortisone levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
+  annotate("text", label = "n = 264", x = 1, y = -4.4, color = "black") + 
+  annotate("text", label = "n = 145", x = 2, y = -4.4, color = "black") +
+  stat_compare_means(label.y = 1.8) + theme(legend.title = element_blank())
+
+ggarrange(a,b,c,d, ncol = 2, nrow = 2)
+
+pdf(file = file.path(plots.dir, 
+                     "boxplots_CAMP_end_trial_metabolite_exacerbations.pdf"),
+    width = 8, height = 8)
+ggarrange(a,b,c,d, ncol = 2, nrow = 2)
+dev.off()
+
+```
+
+## 5.1 CAMP Models end point - with lung function and eos-ige
+
+```{r 5.1.mod.end.lf.eosige, warning=FALSE}
+
+# Additional models for asthma paper (I think we only wanted to do these at end point as at baseline we won't expect to see differences but can confirm with Jessica)
+
+# check distribution of FEV1PP to set cut off, Jessica said usually it is 85%
+setDT(CAMPdata_end_merge)
+sum_sd(CAMPdata_end_merge, "PREFEVPP_F48")
+sum_sd(CAMPdata_end_merge, "POSFEVPP_F48")
+sum_sd(CAMPdata_end_merge, "PREFVCPP_F48")
+sum_sd(CAMPdata_end_merge, "POSFVCPP_F48")
+sum_sd(CAMPdata_end_merge, "PREFF_F48")
+sum_sd(CAMPdata_end_merge, "POSFF_F48")
+
+# for now I am just using PREFEVPP to set threshold and use in the model so removing one subject where data is missing
+CAMPdata_end_merge <- CAMPdata_end_merge[rowSums(is.na(CAMPdata_end_merge[,"PREFEVPP_F48"])) == 0, ]
+
+prefev1.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(PREFEVPP_F48), bins=50) + labs(x="PREFEV1 PP F48")
+posfev1.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(POSFEVPP_F48), bins=50) + labs(x="POSFEV1 PP F48")
+prefvc.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(PREFVCPP_F48), bins=50) + labs(x="PREFVC PP F48")
+posfvc.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(POSFVCPP_F48), bins=50) + labs(x="POSFVC PP F48")
+preff.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(PREFF_F48), bins=50) + labs(x="PREFF PP F48")
+posff.pp.hist <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(POSFF_F48), bins=50) + labs(x="POSFF PP F48")
+p <- grid.arrange(prefev1.pp.hist,posfev1.pp.hist,prefvc.pp.hist,posfvc.pp.hist,preff.pp.hist,posff.pp.hist, nrow = 2, ncol = 3)
+ggsave(p, file=file.path(plots.dir, "hist_LF_phenos.png"), width = 9, height = 9)
+
+# Make categories based on FEV1PP_F48
+CAMPdata_end_merge$FEV1PP_F48.cat80above = ifelse(CAMPdata_end_merge$PREFEVPP_F48<80, 0,1)
+CAMPdata_end_merge$FEV1PP_F48.cat85above = ifelse(CAMPdata_end_merge$PREFEVPP_F48<85, 0,1)
+CAMPdata_end_merge$FEV1PP_F48.cat90above = ifelse(CAMPdata_end_merge$PREFEVPP_F48<90, 0,1)
+
+CAMPdata_end_merge[, .N, .(FEV1PP_F48.cat80above)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(FEV1PP_F48.cat85above)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(FEV1PP_F48.cat90above)][, pct := (N/sum(N))*100] %>% print()
+
+CAMPdata_end_merge[CAMPdata_end_merge$TOTEOS_F48>4000,]$SampleID
+
+# missingness of 1 subject in BMI
+CAMPdata_end_merge <- CAMPdata_end_merge[rowSums(is.na(CAMPdata_end_merge[,"BMI"])) == 0, ]
+
+# rerun models for end point for cortisol and cortisone
+age <- as.numeric(CAMPdata_end_merge$age_at_sample)
+sex <- as.factor(CAMPdata_end_merge$SEX.x)
+race <- as.factor(CAMPdata_end_merge$RACE.x)
+bmi <- CAMPdata_end_merge$BMI
+prefevpp.f48 <- CAMPdata_end_merge$PREFEVPP_F48
+
+# cummulative ED_hospitalization up to 4 year
+CAMPdata_end_merge$cum.edhos.bin <- ifelse(CAMPdata_end_merge$cum_edhos_f48==0,0,1)
+CAMPdata_end_merge$cum.edhos.bin <- as.factor(CAMPdata_end_merge$cum.edhos.bin)
+cum.edhos.bin <- CAMPdata_end_merge$cum.edhos.bin
+table(cum.edhos.bin)
+
+# Any Hospitalization during follow up: suggestive trend in the model   
+HOSPYES <- as.factor(CAMPdata_end_merge$HOSPYES)
+table(HOSPYES)
+#Any ER during follow up
+ERYES <- as.factor(CAMPdata_end_merge$ERYES)
+table(ERYES) # numbers similar to cum.edhos.bin and they are collinear
+
+library(car)
+vif(lm(hpos_QI120~Steroid_binary+cum.edhos.bin+HOSPYES+ERYES, data=CAMPdata_end_merge))
+
+# results stayed same with PAST_ER; PAST_HOS
+# (within last year, not included those though)
+
+##########################################################################
+# Models with individual measures of asthma severity in CAMP for cortisol
+##########################################################################
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+ERYES, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# adjusting for eosinophils
+sum_sd(CAMPdata_end_merge, "TOTEOS_F48") # 8 missing
+sum_sd(CAMPdata_end_merge, "XTIGE_iuml_F48") # 1 missing
+
+# will do this depending on if we include both or one of those
+#CAMPdata_end_merge <- CAMPdata_end_merge[rowSums(is.na(CAMPdata_end_merge[,"TOTEOS_F48"])) == 0, ]
+#CAMPdata_end_merge <- CAMPdata_end_merge[rowSums(is.na(CAMPdata_end_merge[,"XTIGE_iuml_F48"])) == 0, ]
+#age <- as.numeric(CAMPdata_end_merge$age_at_sample)
+#sex <- as.factor(CAMPdata_end_merge$SEX.x)
+#race <- as.factor(CAMPdata_end_merge$RACE.x)
+#bmi <- CAMPdata_end_merge$BMI
+
+prefevpp.f48 <- CAMPdata_end_merge$PREFEVPP_F48
+TOTEOS_F48 <- CAMPdata_end_merge$TOTEOS_F48
+XTIGE_iuml_F48 <- CAMPdata_end_merge$XTIGE_iuml_F48
+# result does not change much by using Ige on log scale
+LOG10IGE_iuml_F48 <- CAMPdata_end_merge$LOG10IGE_iuml_F48
+
+eos <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(TOTEOS_F48), bins=50) + labs(x="TOT EOS F48")
+ige <- ggplot(CAMPdata_end_merge) + geom_histogram(aes(XTIGE_iuml_F48), bins=50) + labs(x="TOT IGE F48")
+p <- grid.arrange(eos, ige, nrow = 1, ncol = 2)
+
+# these subjects look like outliers and are not same subjects?
+CAMPdata_end_merge[CAMPdata_end_merge$TOTEOS_F48>4000,]$SampleID
+CAMPdata_end_merge[CAMPdata_end_merge$XTIGE_iuml_F48>20000,]$SampleID
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+TOTEOS_F48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# makes the pvalue higher but estimates do not change much
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+#######################################################
+# combined model for cortisol, likely overadjustment
+#######################################################
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# stratifying by TOTEOS and XTIGE (tot eos>300 and tot ige>100)
+# results don't differ much compared to continuous variables
+CAMPdata_end_merge$toteos300above = ifelse(CAMPdata_end_merge$TOTEOS_F48<300, 0,1)
+CAMPdata_end_merge$totige100above = ifelse(CAMPdata_end_merge$XTIGE_iuml_F48<100, 0,1)
+CAMPdata_end_merge$toteos300above<-as.factor(CAMPdata_end_merge$toteos300above)
+CAMPdata_end_merge$totige100above<-as.factor(CAMPdata_end_merge$totige100above)
+
+CAMPdata_end_merge[, .N, .(toteos300above)][, pct := (N/sum(N))*100] %>% print()
+CAMPdata_end_merge[, .N, .(totige100above)][, pct := (N/sum(N))*100] %>% print()
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+toteos300above, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+totige100above, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+toteos300above, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+totige100above, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+toteos300above+totige100above, data=CAMPdata_end_merge)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+##########################################################################
+# Models with individual measures of asthma severity in CAMP for cortisone
+##########################################################################
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=4))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+ERYES, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+TOTEOS_F48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+# cum.edhos.bin and ERYES would add some collinearity
+vif(lm(hpos_QI121~Steroid_binary+cum.edhos.bin+HOSPYES+ERYES, data=CAMPdata_end_merge))
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+ERYES, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+#######################################################
+# combined model for cortisone, likely overadjustment
+#######################################################
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+#########################################
+# stratified categories of EOS and IGE
+# not used for the paper though
+#########################################
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+toteos300above, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+totige100above, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+toteos300above, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# continuous has more power as expected? if we decide to go for IgE
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+totige100above, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+prefevpp.f48+cum.edhos.bin+HOSPYES+toteos300above+totige100above, data=CAMPdata_end_merge)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+```
+
+## 5.2 CAMP Models end point stratified by Lung function (not relevant anymore)
+
+```{r 5.2.mod.end.lf, warning=FALSE}
+
+# stratified analysis by lung function
+#low and high LF group (cut off 80%)
+low <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat80above==0,]
+high <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat80above==1,]
+age <- as.numeric(low$age_at_sample)
+sex <- as.factor(low$SEX.x)
+race <- as.factor(low$RACE.x)
+bmi <- low$BMI
+cum.edhos.bin <- low$cum.edhos.bin
+HOSPYES <- low$HOSPYES
+XTIGE_iuml_F48 <- low$XTIGE_iuml_F48
+  
+# cortisol and cortisone in low LF group
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=low)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=low)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=low)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=low)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+# cortisol and cortisone in high LF group
+age <- as.numeric(high$age_at_sample)
+sex <- as.factor(high$SEX.x)
+race <- as.factor(high$RACE.x)
+bmi <- high$BMI
+cum.edhos.bin <- high$cum.edhos.bin
+HOSPYES <- high$HOSPYES
+XTIGE_iuml_F48 <- high$XTIGE_iuml_F48
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=high)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=high)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48, data=high)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+XTIGE_iuml_F48, data=high)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+#low and high LF group (cut off 85%)
+low <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat85above==0,]
+high <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat85above==1,]
+
+# cortisol and cortisone in low LF group
+age <- as.numeric(low$age_at_sample)
+sex <- as.factor(low$SEX.x)
+race <- as.factor(low$RACE.x)
+bmi <- low$BMI
+cum.edhos.bin <- low$cum.edhos.bin
+HOSPYES <- low$HOSPYES
+XTIGE_iuml_F48 <- low$XTIGE_iuml_F48
+
+# just did the full model
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+# cortisol and cortisone in high LF group
+age <- as.numeric(high$age_at_sample)
+sex <- as.factor(high$SEX.x)
+race <- as.factor(high$RACE.x)
+bmi <- high$BMI
+cum.edhos.bin <- high$cum.edhos.bin
+HOSPYES <- high$HOSPYES
+XTIGE_iuml_F48 <- high$XTIGE_iuml_F48
+
+# just did the full model here
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+#low and high LF group (cut off 90%)
+low <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat90above==0,]
+high <- CAMPdata_end_merge[CAMPdata_end_merge$FEV1PP_F48.cat90above==1,]
+
+# cortisol and cortisone in low LF group
+age <- as.numeric(low$age_at_sample)
+sex <- as.factor(low$SEX.x)
+race <- as.factor(low$RACE.x)
+bmi <- low$BMI
+cum.edhos.bin <- low$cum.edhos.bin
+HOSPYES <- low$HOSPYES
+XTIGE_iuml_F48 <- low$XTIGE_iuml_F48
+
+# just did the full model here
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=low)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+# cortisol and cortisone in high LF group
+age <- as.numeric(high$age_at_sample)
+sex <- as.factor(high$SEX.x)
+race <- as.factor(high$RACE.x)
+bmi <- high$BMI
+cum.edhos.bin <- high$cum.edhos.bin
+HOSPYES <- high$HOSPYES
+XTIGE_iuml_F48 <- high$XTIGE_iuml_F48
+
+# just did the full model here
+cortisol.mod <- lm(hpos_QI120~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+cortisone.mod <- lm(hpos_QI121~Steroid_binary*age+age+sex+race+bmi+cum.edhos.bin+HOSPYES+TOTEOS_F48+XTIGE_iuml_F48, data=high)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=3));kable(round(a.ci, digits=2))
+
+```
+
+# 6. Session info
+
+```{r 6.session_info}
+
+sessionInfo()
+
+```
