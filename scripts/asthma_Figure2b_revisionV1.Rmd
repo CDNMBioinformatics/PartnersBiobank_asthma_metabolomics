@@ -1,0 +1,1708 @@
+---
+title: "Asthma_Figure2B re-analysis"
+author: "Priyadarshini Kachroo"
+date: "08/12/2021"
+output: 
+  html_document:
+    code_folding: hide 
+    toc: true
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Setup
+
+## 1.1 Import Packages and any functions
+```{r message=FALSE}
+
+rm(list=ls())
+library(tidyverse)
+library(data.table)
+library(DT)
+
+sig_digits <- 2
+sum_sd <- function(data, varname) {
+  eval(parse(text = str_c("data[, round(summary(", varname, "), digits=2)] %>% print()")))
+  eval(parse(text = str_c("print(str_c('SD: ', data[, sd(", varname, ", na.rm = T) %>% 
+                                round(sig_digits)]))")))
+}
+
+# Save result files with timeStamp
+timeStamp <- as.character(round(unclass(Sys.time())))
+print(timeStamp)
+```
+
+## 1.2 Set Paths
+
+```{r}
+dat_dir <- "/udd/reprk/projects/PartnersBiobank_asthma_metabolomics" # Input Directory
+results_dir = file.path(dat_dir, "code_review/results/")  # Output Directory
+plots_dir = file.path(dat_dir, "code_review/plots/")
+```
+
+## 1.3 File Names
+
+```{r}
+mets_fname <- str_c(results_dir, "samp_final_processed_MGBBA_1628803433.txt")
+
+mets_info_fname <- str_c(results_dir, "metaboliteSummary_MGBB_info_postprocessing_1628803433.csv")
+
+# eos ige data, ppv>0.80, all asthmatics
+eosige <- read.csv(file=file.path(dat_dir, "data/eos_ige_data_before_first_plasma_date_all_subjects.csv"), sep=",", as.is=TRUE, stringsAsFactors=FALSE)
+
+ocsics <- read.csv(file=file.path(dat_dir, "data/ocs_ics_data_before_first_plasma_date_all_subjects.csv"), sep=",", as.is=TRUE, stringsAsFactors=FALSE) # 8766
+```
+
+# 2. Import Data
+
+## 2.1 Metabolite Data Table 
+
+```{r}
+mets <- fread(mets_fname) 
+```
+
+## 2.2 Metabolite Info Table 
+
+```{r}
+mets_info <- fread(mets_info_fname) 
+```
+
+## 2.3 Add Confirmed Steroids
+
+```{r}
+mets_info$SUB.PATHWAY[mets_info$BIOCHEMICAL == "X - 11440"]  <- "Pregnenolone Steroids"
+mets_info$BIOCHEMICAL[mets_info$BIOCHEMICAL == "X - 11440"] <- "pregnenetriol disulfate*"
+
+mets_info$SUB.PATHWAY[mets_info$BIOCHEMICAL == "X - 24544"]  <- "Pregnenolone Steroids"
+mets_info$BIOCHEMICAL[mets_info$BIOCHEMICAL == "X - 24544"] <- "17-hydroxypregnenolone sulfate*"
+
+mets_info$SUB.PATHWAY[mets_info$BIOCHEMICAL == "X - 21470"]  <- "Androgenic Steroids"
+mets_info$BIOCHEMICAL[mets_info$BIOCHEMICAL == "X - 21470"] <- "5-androstenetriol disulfate*"
+
+mets_info$SUB.PATHWAY[mets_info$BIOCHEMICAL == "X - 11470"]  <- "Corticosteroids"
+mets_info$BIOCHEMICAL[mets_info$BIOCHEMICAL == "X - 11470"] <- "tetrahydrocorticosterone glucuronide*"
+
+mets_info$SUB.PATHWAY[mets_info$BIOCHEMICAL == "X - 24546"]  <- "Androgenic Steroids"
+mets_info$BIOCHEMICAL[mets_info$BIOCHEMICAL == "X - 24546"] <- "6a-hydroxy-DHEA-disulfate*"
+```
+
+# 3. Asthma vs. Control
+
+## 3.1 Extract Steroid Metabolites
+
+```{r}
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+```
+
+## 3.1 Extract X
+
+```{r}
+x <- mets[, ..mets_list_steroids]
+```
+
+## 3.2 Extract Y Variables
+
+```{r}
+y_asthma <- mets$ASTHMA 
+y_ics <- as.numeric(mets$Any.ICS.total.To.3.24.2020.)
+table(y_asthma); table(y_ics)
+sum_sd(mets, "Any.ICS.total.To.3.24.2020.")
+```
+
+## 3.3 Extract Confounders
+
+```{r}
+age <- as.numeric(mets$Age)
+sex <- as.factor(mets$Sex)
+race <- as.factor(mets$RACE_cat)
+smoke <- as.factor(mets$Smoking)
+bmi <- as.numeric(mets$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+```
+
+## 3.4 Drop NA ICS
+
+```{r}
+x <- x[!is.na(y_ics),] # 25 subjects with missing ICS info will be dropped
+dim(x)
+confs <- confs[!is.na(y_ics),]; dim(confs)
+y_asthma <- y_asthma[!is.na(y_ics)]; table(y_asthma)
+y_ics <- y_ics[!is.na(y_ics)]; table(y_ics)
+table(y_asthma, y_ics) # some subjects taking upto 3 prescription counts
+```
+
+## 3.5 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output3 <- data.table(mets_list)
+lr_output3$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output3$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output3$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output3$KEGG <- mets_info_steroids$KEGG
+lr_output3$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output3$or <- or
+lr_output3$or_lowci <- or_lowci
+lr_output3$or_uppci <- or_uppci
+lr_output3$pval <- pval
+lr_output3$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 3.6 Output Summary
+
+```{r}
+dim(lr_output3) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output3$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output3[lr_output3$qval < 0.05], filter = 'top') # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output3, filter = 'top') # All Output
+```
+
+## 3.7 Export Plot
+
+```{r}
+# Plot Order is based on Asthma vs. Control: Order by Sub-Pathway, and then by OR
+lr_output3$SUB.PATHWAY <- factor(lr_output3$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+lr_output3 <- lr_output3[with(lr_output3, order(SUB.PATHWAY, or)), ]
+plot_order <- lr_output3$BIOCHEMICAL
+```
+
+```{r}
+export_fig_fname <- str_c(plots_dir, "AsthmavsControl.eps")
+
+lr_output3$BIOCHEMICAL <- factor(lr_output3$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output3, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 10.0, height = 12.0, units = c("in"))
+
+```
+
+## 3.8 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmavsControl_", timeStamp, ".csv"))
+write.csv(lr_output3, export_csv_fname)
+
+```
+
+# 4. Asthma ICS vs. Control
+
+## 4.1 Without removing subjects (ICS 4 or more)
+
+## 4.1.1 Extract Steroid Metabolites
+
+```{r}
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+```
+
+## 4.1.2 Extract X
+
+```{r}
+x <- mets[, ..mets_list_steroids]
+```
+
+## 4.1.3 Extract Y Variables
+
+```{r}
+y_asthma <- mets$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets$Any.ICS.total.To.3.24.2020.) 
+```
+
+## 4.1.4 Extract Confounders
+
+```{r}
+age <- as.numeric(mets$Age)
+sex <- as.factor(mets$Sex)
+race <- as.factor(mets$RACE_cat)
+smoke <- as.factor(mets$Smoking)
+bmi <- as.numeric(mets$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+```
+
+## 4.1.5 Drop NA ICS
+
+```{r}
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+```
+
+## 4.1.6 KEEP ICS >= 4 for Asthma + Controls
+
+```{r}
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls
+keep[y_asthma == 1 & y_ics >=4] <- 1  # Keep asthma + ICS >= 4
+table(keep) # 90 subjects with ICS
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1]
+y <- y_asthma
+table(y)
+```
+
+## 4.1.7 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output4 <- data.table(mets_list)
+lr_output4$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output4$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output4$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output4$KEGG <- mets_info_steroids$KEGG
+lr_output4$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output4$or <- or
+lr_output4$or_lowci <- or_lowci
+lr_output4$or_uppci <- or_uppci
+lr_output4$pval <- pval
+lr_output4$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 4.1.8 Output Summary
+
+```{r}
+dim(lr_output4) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output4$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output4[lr_output4$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output4, filter = 'top') # All Output
+```
+
+## 4.1.9 Export Plot
+
+```{r}
+lr_output4$SUB.PATHWAY <- factor(lr_output4$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsCONTROL.eps")
+
+lr_output4$BIOCHEMICAL <- factor(lr_output4$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output4, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 4.1.10 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsCONTROL_", timeStamp, ".csv"))
+write.csv(lr_output4, export_csv_fname)
+```
+
+## 4.2 Reevaluate after removing subs in between (ICS 4 or more)
+
+## 4.2.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 4 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Drop NAs ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+```
+
+## 4.2.2 KEEP ICS >= 4 for Asthma (Removing subs in between) + Controls
+
+```{r}
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls
+keep[y_asthma == 1 & y_ics >=4] <- 1  # Keep asthma + ICS >= 4
+table(keep)
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1]
+y <- y_asthma
+table(y) # 306 controls and 172 asthmatics with ICS
+```
+
+## 4.2.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output4a <- data.table(mets_list)
+lr_output4a$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output4a$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output4a$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output4a$KEGG <- mets_info_steroids$KEGG
+lr_output4a$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output4a$or <- or
+lr_output4a$or_lowci <- or_lowci
+lr_output4a$or_uppci <- or_uppci
+lr_output4a$pval <- pval
+lr_output4a$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 4.2.4 Output Summary
+
+```{r}
+dim(lr_output4a) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output4a$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output4a[lr_output4a$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output4a, filter = 'top') # All Output
+```
+
+## 4.2.5 Export Plot
+
+```{r}
+lr_output4a$SUB.PATHWAY <- factor(lr_output4a$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsCONTROL_4a_4ormore_removesub.eps")
+
+lr_output4a$BIOCHEMICAL <- factor(lr_output4a$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output4a, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 4.2.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsCONTROL_4a_4ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output4a, export_csv_fname)
+```
+
+
+## 4.3 Reevaluate after removing subs in between (ICS 10 or more)
+
+## 4.3.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 10 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3,4,5,6,7,8,9)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Drop NAs ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+```
+
+## 4.3.2 KEEP ICS >= 10 for Asthma (Removing subs in between) + Controls
+
+```{r}
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls
+keep[y_asthma == 1 & y_ics >=10] <- 1  # Keep asthma + ICS >= 10
+table(keep)
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1]
+y <- y_asthma
+table(y) # 306 controls and 105 asthmatics with ICS
+```
+
+## 4.3.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output4b <- data.table(mets_list)
+lr_output4b$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output4b$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output4b$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output4b$KEGG <- mets_info_steroids$KEGG
+lr_output4b$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output4b$or <- or
+lr_output4b$or_lowci <- or_lowci
+lr_output4b$or_uppci <- or_uppci
+lr_output4b$pval <- pval
+lr_output4b$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 4.3.4 Output Summary
+
+```{r}
+dim(lr_output4b) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output4b$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output4b[lr_output4b$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output4b, filter = 'top') # All Output
+```
+
+## 4.3.5 Export Plot
+
+```{r}
+lr_output4b$SUB.PATHWAY <- factor(lr_output4b$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsCONTROL_4b_10ormore_removesub.eps")
+
+lr_output4b$BIOCHEMICAL <- factor(lr_output4b$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output4b, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 4.3.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsCONTROL_4b_10ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output4b, export_csv_fname)
+```
+
+# 5. Asthma NO ICS vs. Control
+
+## 5.1 Including ICS < 4 (0-3) as No ICS (as originally done in the paper)
+
+## 5.1.1 Extract Steroid Metabolites
+
+```{r}
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+```
+
+## 5.1.2 Extract X
+
+```{r}
+x <- mets[, ..mets_list_steroids]
+```
+
+## 5.1.3 Extract Y Variables
+
+```{r}
+y_asthma <- mets$ASTHMA 
+y_ics <- as.numeric(mets$Any.ICS.total.To.3.24.2020.) 
+```
+
+## 5.1.4 Extract Confounders
+
+```{r}
+age <- as.numeric(mets$Age)
+sex <- as.factor(mets$Sex)
+race <- as.factor(mets$RACE_cat)
+smoke <- as.factor(mets$Smoking)
+bmi <- as.numeric(mets$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+```
+
+## 5.1.5 Drop NA ICS
+
+```{r}
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+```
+
+## 5.1.6 Include ICS < 4 for Asthma no ICS + Controls
+
+```{r}
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls
+keep[y_asthma == 1 & y_ics < 4] <- 1 # Keep asthma + ICS < 4
+
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1] # 323 controls 90 asthmatics without ICS
+```
+
+## 5.1.7 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output5 <- data.table(mets_list)
+lr_output5$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output5$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output5$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output5$KEGG <- mets_info_steroids$KEGG
+lr_output5$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output5$or <- or
+lr_output5$or_lowci <- or_lowci
+lr_output5$or_uppci <- or_uppci
+lr_output5$pval <- pval
+lr_output5$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 5.1.8 Output Summary
+
+```{r}
+dim(lr_output5) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output5$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output5[lr_output5$qval < 0.05], filter = 'top') # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output5, filter = 'top') # All Output
+```
+
+## 5.1.9 Export Plot
+
+```{r}
+lr_output5$SUB.PATHWAY <- factor(lr_output5$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaNOICSvsCONTROL.eps")
+
+lr_output5$BIOCHEMICAL <- factor(lr_output5$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output5, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 5.1.10 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaNOICSvsCONTROL_", timeStamp, ".csv"))
+write.csv(lr_output5, export_csv_fname)
+```
+
+## 5.2 Reevaluate after removing subs in between (ICS presc of 1-3)
+
+## 5.2.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 4 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Drop NA ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+table(y_asthma, y_ics)
+```
+
+## 5.2.2 DROP ICS 1 to 3 for Asthma (Removing subs in between) + Controls
+
+```{r}
+
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls ~ 306
+keep[y_asthma == 1 & y_ics < 4] <- 1 # # Keep asthma + ICS < 4
+
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1] # 306 controls and 42 asthmatics without ICS 
+
+```
+
+## 5.2.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output5a <- data.table(mets_list)
+lr_output5a$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output5a$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output5a$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output5a$KEGG <- mets_info_steroids$KEGG
+lr_output5a$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output5a$or <- or
+lr_output5a$or_lowci <- or_lowci
+lr_output5a$or_uppci <- or_uppci
+lr_output5a$pval <- pval
+lr_output5a$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 5.2.4 Output Summary
+
+```{r}
+dim(lr_output5a) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output5a$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output5a[lr_output5a$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output5a, filter = 'top') # All Output
+```
+
+## 5.2.5 Export Plot
+
+```{r}
+lr_output5a$SUB.PATHWAY <- factor(lr_output5a$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaNOICSvsCONTROL_5a_4ormore_removesub.eps")
+
+lr_output5a$BIOCHEMICAL <- factor(lr_output5a$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output5a, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 5.2.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaNOICSvsCONTROL_5a_4ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output5a, export_csv_fname)
+```
+
+## 5.3 Reevaluate after removing subs in between (ICS presc of 1-9)
+
+## 5.3.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 10 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3,4,5,6,7,8,9)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Drop NA ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_asthma <- y_asthma[!is.na(y_ics)]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+table(y_asthma, y_ics)
+```
+
+## 5.3.2 DROP ICS 1 to 9 for Asthma (Removing subs in between) + Controls
+
+```{r}
+
+# this analyses should give same results as 4 or more for comparing asthma no ICS with controls 
+# as the number of subjects in categories would be same
+keep <-  c(1:length(y_asthma))*0
+keep[y_asthma == 0] <- 1 # Keep controls ~ 306
+keep[y_asthma == 1 & y_ics < 10] <- 1 # Keep asthma + ICS < 10
+
+x <- x[keep == 1,]
+confs <- confs[keep == 1,]
+y_ics <- y_ics[keep == 1]
+y_asthma <- y_asthma[keep == 1] # 306 controls and 42 asthmatics without ICS
+table(y_asthma)
+```
+
+## 5.3.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_asthma, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_asthma ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output5b <- data.table(mets_list)
+lr_output5b$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output5b$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output5b$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output5b$KEGG <- mets_info_steroids$KEGG
+lr_output5b$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output5b$or <- or
+lr_output5b$or_lowci <- or_lowci
+lr_output5b$or_uppci <- or_uppci
+lr_output5b$pval <- pval
+lr_output5b$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 5.3.4 Output Summary
+
+```{r}
+dim(lr_output5b) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output5b$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output5b[lr_output5b$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output5b, filter = 'top') # All Output
+```
+
+## 5.3.5 Export Plot
+
+```{r}
+lr_output5b$SUB.PATHWAY <- factor(lr_output5b$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaNOICSvsCONTROL_5b_10ormore_removesub.eps")
+
+lr_output5b$BIOCHEMICAL <- factor(lr_output5b$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output5b, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 5.3.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaNOICSvsCONTROL_5b_10ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output5b, export_csv_fname)
+```
+
+# 6. Asthma ICS vs. Asthma NO ICS
+
+## 6.1 ICS defined as 4 or more without removing subjects (as originally in the paper)
+
+## 6.1.1 Extract Steroid Metabolites
+
+```{r}
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+```
+
+## 6.1.2 Extract X
+
+```{r}
+x <- mets[, ..mets_list_steroids]
+```
+
+## 6.1.3 Extract Y Variables
+
+```{r}
+y_asthma <- mets$ASTHMA 
+y_ics <- as.numeric(mets$Any.ICS.total.To.3.24.2020.) 
+```
+
+## 6.1.4 Extract Confounders
+
+```{r}
+age <- as.numeric(mets$Age)
+sex <- as.factor(mets$Sex)
+race <- as.factor(mets$RACE_cat)
+smoke <- as.factor(mets$Smoking)
+bmi <- as.numeric(mets$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+```
+
+## 6.1.5 Keep ONLY Asthmatics
+
+```{r}
+x <- x[y_asthma == 1,]
+confs <- confs[y_asthma == 1,]
+y_ics <- y_ics[y_asthma == 1]
+```
+
+## 6.1.6 Drop NA ICS
+
+```{r}
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_ics <- y_ics[!is.na(y_ics)]
+```
+
+## 6.1.7 Set ICS cut-off to 4
+
+```{r}
+y_ics_4 <- y_ics
+y_ics_4[y_ics_4 < 4] <- 0
+y_ics_4[y_ics_4 >= 4] <- 1
+table(y_ics_4)
+```
+
+## 6.1.8 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_ics_4, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_ics_4 ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output6 <- data.table(mets_list)
+lr_output6$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output6$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output6$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output6$KEGG <- mets_info_steroids$KEGG
+lr_output6$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output6$or <- or
+lr_output6$or_lowci <- or_lowci
+lr_output6$or_uppci <- or_uppci
+lr_output6$pval <- pval
+lr_output6$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 6.1.9 Output Summary
+
+```{r}
+dim(lr_output6) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output6$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output6[lr_output6$qval < 0.05], filter = 'top') # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output6, filter = 'top')  # All Output
+```
+
+## 6.1.10 Export Plot
+
+```{r}
+lr_output6$SUB.PATHWAY <- factor(lr_output6$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsAsthmaNOICS.eps")
+
+lr_output6$BIOCHEMICAL <- factor(lr_output6$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output6, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 6.1.11 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsAsthmaNOICS_", timeStamp, ".csv"))
+write.csv(lr_output6, export_csv_fname)
+```
+
+## 6.2 Reevaluate after removing subs in between (ICS prescr. of 1-3) and Keep only asthmatics
+
+## 6.2.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 4 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+table(y_ics, y_asthma)
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Keep ONLY Asthmatics
+x <- x[y_asthma == 1,]; dim(x)
+confs <- confs[y_asthma == 1,]
+y_ics <- y_ics[y_asthma == 1]
+
+# Drop NA ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+```
+
+## 6.2.2 Set ICS cut-off to 4
+
+```{r}
+
+y_ics_4 <- y_ics
+y_ics_4[y_ics_4 < 4] <- 0
+y_ics_4[y_ics_4 >= 4] <- 1
+table(y_ics_4) # 172 asthmatics with ICS and 42 without ICS
+```
+
+## 6.2.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_ics_4, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_ics_4 ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output6a <- data.table(mets_list)
+lr_output6a$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output6a$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output6a$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output6a$KEGG <- mets_info_steroids$KEGG
+lr_output6a$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output6a$or <- or
+lr_output6a$or_lowci <- or_lowci
+lr_output6a$or_uppci <- or_uppci
+lr_output6a$pval <- pval
+lr_output6a$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 6.2.4 Output Summary
+
+```{r}
+dim(lr_output6a) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output6a$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output6a[lr_output6a$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output6a, filter = 'top') # All Output
+```
+
+## 6.2.5 Export Plot
+
+```{r}
+lr_output6a$SUB.PATHWAY <- factor(lr_output6a$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsAsthmaNOICS_6a_4ormore_removesub.eps")
+
+lr_output6a$BIOCHEMICAL <- factor(lr_output6a$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output6a, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 6.2.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsAsthmaNOICS_6a_4ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output6a, export_csv_fname)
+```
+
+## 6.3 Reevaluate after removing subs in between (ICS prescr. of 1-9) and Keep only asthmatics
+
+## 6.3.1 Extract Steroid Metabolites and drop NA ICS
+
+```{r}
+
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# remove subjects with >0 and less than 10 prescriptions
+mets.fil = filter(mets, !(mets$Any.ICS.total.To.3.24.2020. %in% c(1,2,3,4,5,6,7,8,9)))
+
+# Extract X
+x <- mets.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mets.fil$ASTHMA # 610 subjects reloaded
+y_ics <- as.numeric(mets.fil$Any.ICS.total.To.3.24.2020.) 
+table(y_ics, y_asthma)
+
+# Extract Confounders
+age <- as.numeric(mets.fil$Age)
+sex <- as.factor(mets.fil$Sex)
+race <- as.factor(mets.fil$RACE_cat)
+smoke <- as.factor(mets.fil$Smoking)
+bmi <- as.numeric(mets.fil$BMI)
+
+confs <- data.frame(age, sex, race, smoke, bmi)
+
+# Keep ONLY Asthmatics
+x <- x[y_asthma == 1,]; dim(x)
+confs <- confs[y_asthma == 1,]
+y_ics <- y_ics[y_asthma == 1]
+
+# Drop NA ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+```
+
+## 6.3.2 Set ICS cut-off to 10
+
+```{r}
+
+y_ics_10 <- y_ics
+y_ics_10[y_ics_10 < 10] <- 0
+y_ics_10[y_ics_10 >= 10] <- 1
+table(y_ics_10) # 105 asthmatics with ICS and 42 without ICS
+```
+
+## 6.3.3 Build Model
+
+```{r}
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_ics_10, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi")
+  fmla <- as.formula(paste("y_ics_10 ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output6b <- data.table(mets_list)
+lr_output6b$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output6b$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output6b$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output6b$KEGG <- mets_info_steroids$KEGG
+lr_output6b$Group.HMDB <- mets_info_steroids$Group.HMDB
+
+lr_output6b$or <- or
+lr_output6b$or_lowci <- or_lowci
+lr_output6b$or_uppci <- or_uppci
+lr_output6b$pval <- pval
+lr_output6b$qval <- p.adjust(pval, method = 'BH')
+```
+
+## 6.3.4 Output Summary
+
+```{r}
+dim(lr_output6b) # Number of Steroids Metabolites
+```
+
+```{r}
+table(lr_output6b$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+```
+
+```{r}
+DT::datatable(lr_output6b[lr_output6b$qval < 0.05], filter = 'top')  # Significant Steroid Metabolites
+```
+
+```{r}
+DT::datatable(lr_output6b, filter = 'top') # All Output
+```
+
+## 6.3.5 Export Plot
+
+```{r}
+lr_output6b$SUB.PATHWAY <- factor(lr_output6b$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsAsthmaNOICS_6b_10ormore_removesub.eps")
+
+lr_output6b$BIOCHEMICAL <- factor(lr_output6b$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output6b, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+```
+
+## 6.3.6 Export CSV
+
+```{r}
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsAsthmaNOICS_6b_10ormore_removesub_", timeStamp, ".csv"))
+write.csv(lr_output6b, export_csv_fname)
+```
+
+## 6.4 Asthma ICS vs. Asthma NO ICS including severity and Oral corticosteroids (OCS)
+
+## 6.4.1 Original analysis but adjusting for severity scale and OCS (4 or more)
+
+```{r 6.4.1.ast.ics.noics_severity}
+
+#######################################
+# ICS piece - defining severity scale
+#######################################
+
+# Look at this only in asthmatics: is ICS associated with a reduction in steroid levels
+# if we want to add severity scale to the model
+mets$mild.int=ifelse(mets$Mild.intermittent.asthma..Count..To.3.24.2020.==0,0,1)
+mets$mild.pers=ifelse(mets$Mild.persistent.asthma..Count..To.3.24.2020.==0,0,1)
+mets$mod.pers=ifelse(mets$Moderate.persistent.asthma..Count..To.3.24.2020.==0,0,1)
+mets$sev.pers=ifelse(mets$Severe.persistent.asthma..Count..To.3.24.2020.==0,0,1)
+mets.asm <- mets[mets$ASTHMA==1,]
+mets.asm$severity_scale[mets.asm$mild.int==0 & mets.asm$mild.pers==0 & mets.asm$mod.pers==0 & mets.asm$sev.pers==0]<-0
+mets.asm$severity_scale[mets.asm$mild.int==1 | mets.asm$mild.pers==1 & mets.asm$mod.pers==0 & mets.asm$sev.pers==0]<-1
+mets.asm$severity_scale[mets.asm$mod.pers==1]<-2
+mets.asm$severity_scale[mets.asm$sev.pers==1]<-3
+table(mets.asm$severity_scale)
+# 0   1   3   4 
+# 72 146  50  19  
+mets.asm$severity_scale <- as.factor(mets.asm$severity_scale)
+
+# merge with ocsics and eosige file Mengna generated
+#mets.asm.ocsics <- merge(mets.asm, ocsics, by.x="Biobank.Subject.ID", by.y="Biobank_Subject_ID", sort=F)
+# remove subjects with >0 and less than 4 prescriptions
+allerg_meds <- merge(eosige, ocsics, by="Biobank_Subject_ID", sort=F)
+mets.asm.ocsics.eosige <- merge(mets.asm, allerg_meds, by.x="Biobank.Subject.ID", by.y="Biobank_Subject_ID", sort=F)
+
+#dim(filter(eosige, eos_mean_5ybf_1stplasma>=0.20 & n_eos_rec_5ybf_1stplasma=1))
+sel <- mets.asm.ocsics.eosige %>% dplyr::select(n_ocs_rec_1ybf_1stplasma, n_ocs_rec_2ybf_1stplasma, n_ocs_rec_5ybf_1stplasma, n_ics_rec_1ybf_1stplasma, n_ics_rec_2ybf_1stplasma, n_ics_rec_5ybf_1stplasma, n_eos_rec_1ybf_1stplasma, n_eos_rec_2ybf_1stplasma, n_eos_rec_5ybf_1stplasma, n_ige_rec_1ybf_1stplasma, n_ige_rec_2ybf_1stplasma, n_ige_rec_5ybf_1stplasma)
+# View(sel)
+#DT::datatable(sel, filter = 'top')
+sapply(sel, function(x) sum(is.na(x)))
+#n_ocs_rec_1ybf_1stplasma n_ocs_rec_2ybf_1stplasma n_ocs_rec_5ybf_1stplasma n_ics_rec_1ybf_1stplasma 
+#                     246                      242                      237                      246 
+#n_ics_rec_2ybf_1stplasma n_ics_rec_5ybf_1stplasma n_eos_rec_1ybf_1stplasma n_eos_rec_2ybf_1stplasma 
+#                     242                      237                      225                      222 
+#n_eos_rec_5ybf_1stplasma n_ige_rec_1ybf_1stplasma n_ige_rec_2ybf_1stplasma n_ige_rec_5ybf_1stplasma 
+#                     218                      261                      261                      261 
+                     
+# majority of subjects have missing data on ocs/ics and eos/ige within past year, 2 and 5 years
+# Among those that have data, looks like there are some subjects though that do take ocs but not on ics within last year
+# removes 12 subjects that have OCS only in past year but no ICS
+#mgbb.med.all.fil = filter(mets.asm.ocsics.eosige, !(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma %in% c(1,2,3) & mets.asm.ocsics.eosige$n_ics_rec_1ybf_1stplasma %in% 0 & mets.asm.ocsics.eosige$n_ics_rec_2ybf_1stplasma %in% 0 & mets.asm.ocsics.eosige$n_ics_rec_5ybf_1stplasma %in% 0))
+
+# removes 14 subjects with any kind of OCS in the past year otherwise there are 17 subjects with OCS in the past year, if you want to remove those subjects and see how results change but that would reduce more power
+table(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma)
+#mgbb.med.all.fil = filter(mets.asm.ocsics.eosige, !(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma %in% c(1,2,3)))
+
+# create a binary classification of OCS for presence and absence
+mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma[is.na(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma)] <- 0
+table(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma)
+mets.asm.ocsics.eosige$ocs_cat=ifelse(mets.asm.ocsics.eosige$n_ocs_rec_1ybf_1stplasma==0,0,1)
+mets.asm.ocsics.eosige$ocs_cat <- as.factor(mets.asm.ocsics.eosige$ocs_cat)
+table(mets.asm.ocsics.eosige$ocs_cat)
+mgbb.med.all.fil <- mets.asm.ocsics.eosige
+
+# Recreate objects
+#Extract Steroid Metabolites
+steroids_subpathways <- c('Androgenic Steroids', 'Corticosteroids', 'Pregnenolone Steroids', 'Progestin Steroids')
+mets_info_steroids <- subset(mets_info,SUB.PATHWAY %in% steroids_subpathways)
+mets_list_steroids <- mets_info_steroids$met_ID
+
+# Extract X
+x <- mgbb.med.all.fil[, ..mets_list_steroids]
+
+# Extract Y Variables
+y_asthma <- mgbb.med.all.fil$ASTHMA
+y_ics <- as.numeric(mgbb.med.all.fil$Any.ICS.total.To.3.24.2020.) 
+table(y_ics, y_asthma)
+
+# Extract Confounders
+age <- as.numeric(mgbb.med.all.fil$Age)
+sex <- as.factor(mgbb.med.all.fil$Sex)
+race <- as.factor(mgbb.med.all.fil$RACE_cat)
+smoke <- as.factor(mgbb.med.all.fil$Smoking)
+bmi <- as.numeric(mgbb.med.all.fil$BMI)
+severity_scale <- as.factor(mgbb.med.all.fil$severity_scale)
+ocs_cat <- mgbb.med.all.fil$ocs_cat
+confs <- data.frame(age, sex, race, smoke, bmi, severity_scale, ocs_cat)
+
+# Keep ONLY Asthmatics
+x <- x[y_asthma == 1,]; dim(x)
+confs <- confs[y_asthma == 1,]
+y_ics <- y_ics[y_asthma == 1]
+
+# Drop NA ICS
+x <- x[!is.na(y_ics),]
+confs <- confs[!is.na(y_ics),]
+y_ics <- y_ics[!is.na(y_ics)]
+table(y_asthma);table(y_ics)
+
+y_ics_4 <- y_ics
+y_ics_4[y_ics_4 < 4] <- 0
+y_ics_4[y_ics_4 >= 4] <- 1
+table(y_ics_4)
+
+pval <- c()
+or <- c()
+or_lowci <- c()
+or_uppci <- c()
+
+for (i in 1:ncol(x)){
+  # Get metab x
+  met_i <- x[, ..i]
+  met_i_name <- names(met_i)
+  
+  # Build data frame
+  df <- cbind(y_ics_4, confs, x)
+  xvars <- c(met_i_name) # for formula
+  xvars <- c(met_i_name, "age", "sex", "race", "smoke", "bmi", "severity_scale", "ocs_cat")
+  fmla <- as.formula(paste("y_ics_4 ~ ", paste(xvars, collapse= "+")))
+  
+  # Build model and keep pvalue
+  lr<- glm(fmla, data=df) 
+  pval_i <- coef(summary(lr))[2,4]
+  pval <- c(pval, pval_i)
+  or_i <- exp(coef(summary(lr))[2,1])
+  or <- c(or, or_i)
+  or_lowci_i <- exp(confint(lr)[2,1])
+  or_lowci <- c(or_lowci, or_lowci_i)
+  or_uppci_i <- exp(confint(lr)[2,2])
+  or_uppci <- c(or_uppci, or_uppci_i)  
+}
+
+mets_list = colnames(x)
+lr_output6c <- data.table(mets_list)
+lr_output6c$BIOCHEMICAL <- mets_info_steroids$BIOCHEMICAL
+lr_output6c$SUPER.PATHWAY <- mets_info_steroids$SUPER.PATHWAY
+lr_output6c$SUB.PATHWAY <- mets_info_steroids$SUB.PATHWAY
+lr_output6c$KEGG <- mets_info_steroids$KEGG
+lr_output6c$Group.HMDB <- mets_info_steroids$Group.HMDB
+lr_output6c$or <- or
+lr_output6c$or_lowci <- or_lowci
+lr_output6c$or_uppci <- or_uppci
+lr_output6c$pval <- pval
+lr_output6c$qval <- p.adjust(pval, method = 'BH')
+
+dim(lr_output6c) # Number of Steroids Metabolites
+
+table(lr_output6c$SUB.PATHWAY) # Number of Steroids Metabolites in each pathway
+
+# there could still be power issues
+DT::datatable(lr_output6c[lr_output6c$pval < 0.05], filter = 'top') 
+
+DT::datatable(lr_output6c, filter = 'top') # All Output
+
+lr_output6c$SUB.PATHWAY <- factor(lr_output6c$SUB.PATHWAY, levels = c("Androgenic Steroids", "Pregnenolone Steroids", "Corticosteroids", "Progestin Steroids"))
+
+export_fig_fname <- str_c(plots_dir, "AsthmaICSvsAsthmaNOICS_6c_4ormore_without_rem_sub_adj_severity_ocs.eps")
+
+lr_output6c$BIOCHEMICAL <- factor(lr_output6c$BIOCHEMICAL, levels = rev(plot_order))
+ggplot(lr_output6c, aes(x=or, y=BIOCHEMICAL, group=SUB.PATHWAY, color=SUB.PATHWAY, fill=SUB.PATHWAY)) + 
+  geom_point()+
+  geom_errorbar(aes(x=or, xmin=or_lowci, xmax=or_uppci), width=.2) +
+  geom_vline(xintercept=1, linetype="dotted") +
+  xlim(0.76, 1.11)
+ggsave(file=export_fig_fname, device="eps", width = 8.0, height = 12.0, units = c("in"))
+
+export_csv_fname <- str_c(results_dir, paste0("AsthmaICSvsAsthmaNOICS_6c_4ormore_without_rem_sub_adj_severity_ocs_", timeStamp, ".csv"))
+write.csv(lr_output6c, export_csv_fname)
+
+```
+
+# 7. Session info
+
+```{r 7.session_info}
+gc()
+sessionInfo()
+```

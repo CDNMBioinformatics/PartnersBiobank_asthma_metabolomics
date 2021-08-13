@@ -1,7 +1,7 @@
 ---
 title: "CAMP validation"
 author: "PKachroo, reprk, Channing Lab, BWH"
-date: "08/11/2021"
+date: "08/12/2021"
 output:
   html_document:
     code_folding: hide 
@@ -146,7 +146,7 @@ table(CAMP_phend$TG)
 # 566 subjects and 563 named metabs out of all 19,728 metabolites
 CAMPdata_end <- CAMPmetabs[ rownames(CAMPmetabs) %in% CAMP_phend$SampleID, ]
 
-#Model 1: Linear regression with metabolite as the outcome, Budenoside vs ned + placebo
+#Model 1: Linear regression with metabolite as the outcome, Budesonide vs nedocramil + placebo
 # CAMP should have no smokers and all asthmatics
 CAMP_phend$Steroid_binary=ifelse(CAMP_phend$TG==1,1,0)
 CAMP_phend$Steroid_binary <- as.factor(CAMP_phend$Steroid_binary)
@@ -179,7 +179,7 @@ CAMPdata_end_merge <- merge(CAMP_phend.b, CAMPdata_end, by.x="SampleID", by.y="r
 # Get baseline data for those 560 subjects
 CAMPdata_baseline_merge <- merge(CAMP_baseline, CAMPdata_baseline, by.x="SampleID", by.y="row.names", sort=F)
 
-# Within CAMP subjects at end point, stratify by ICS use i.e in subjects taking budenoside:
+# Within CAMP subjects at end point, stratify by ICS use i.e in subjects taking budesonide:
 # Identify whether those with exacerbation have lower metabolite levels compared to those who don't
 CAMP.phfi.end <- merge(CAMP_phend.b, camp_pheno, by="camp", sort=F)
 CAMPdata_end_merge <- merge(CAMP.phfi.end, CAMPdata_end, by.x="SampleID", by.y="row.names", sort=F)
@@ -389,7 +389,7 @@ summary(lm(hpos_QI121~cum.edhos.bin*age+age+sex+race+bmi, data=CAMPplacn))
 a <- ggboxplot(CAMPbud, x = "cum.edhos.bin", y = "hpos_QI120",
                color = "cum.edhos.bin", palette ="jco",ylim=c(-3,2),
                add = "jitter", shape = "cum.edhos.bin", 
-  xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/Budenoside)",
+  xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/budesonide)",
   ylab="Cortisol levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
   annotate("text", label = "n = 111", x = 1, y = -2.9, color = "black") + 
   annotate("text", label = "n = 40", x = 2, y = -2.9, color = "black") +
@@ -398,7 +398,7 @@ a <- ggboxplot(CAMPbud, x = "cum.edhos.bin", y = "hpos_QI120",
 b <- ggboxplot(CAMPbud, x = "cum.edhos.bin", y = "hpos_QI121",
                color = "cum.edhos.bin", palette ="jco",ylim=c(-4,2),
                add = "jitter", shape = "cum.edhos.bin", 
- xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/Budenoside)",
+ xlab="Exacerbation based on cumulative hospitalizations\n(Subjects on ICS/budesonide)",
  ylab="Cortisone levels", bxp.errorbar = TRUE, bxp.errorbar.width = 0.3) + 
   annotate("text", label = "n = 111", x = 1, y = -3.9, color = "black") + 
   annotate("text", label = "n = 40", x = 2, y = -3.9, color = "black") +
@@ -432,7 +432,7 @@ dev.off()
 
 ```
 
-## 5.1 CAMP Models end point - with lung function and eos-ige
+## 5.1 CAMP Models end point - with lung function and eos-ige (for revision)
 
 ```{r 5.1.mod.end.lf.eosige, warning=FALSE}
 

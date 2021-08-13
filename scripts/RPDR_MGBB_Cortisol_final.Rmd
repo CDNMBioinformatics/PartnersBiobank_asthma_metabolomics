@@ -1,0 +1,478 @@
+---
+title: "MGBB RPDR-EMR Cortisol analysis"
+author: "Priyadarshini Kachroo"
+date: "08/13/2021"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+# restart R session
+#.rs.restartR()
+rm(list=ls())
+
+## load libraries
+libs <- c("ggpubr", "gdata", "MASS", "gplots", "ggplot2", "gmodels", "knitr", "R.utils", "impute", "tidyr","scales", "sqldf","dplyr","tidyverse", "data.table", "gridExtra","lubridate", "markdown","foreign", "Hmisc", "reshape2", "lme4",
+          "magrittr", "Biobase", "splitstackshape", "matrixStats")
+
+for (l in libs) {
+        if (require(l, character.only = T)) {
+                print(paste0(l, " loaded successfully"))
+        } else {
+                install.packages(l)
+                require(l, character.only = T)
+                print(paste0(l, " installed and loaded successfully"))
+        }
+}
+
+## Paths
+setwd("/udd/reprk/projects/PartnersBiobank_asthma_metabolomics/scripts")
+plots.dir <- "../code_review/plots"
+
+# run this to knit the document
+
+#knit("template.Rmd")
+#markdownToHTML(file="template.md",output="template.html",header="<style>body {max-width: 2000px;}</style>")
+
+# Function modified from here
+# source("http://goo.gl/UUyEzD")
+outlierKD <- function(dt, var) {
+     var_name <- eval(substitute(var),eval(dt))
+     na1 <- sum(is.na(var_name))
+     m1 <- mean(var_name, na.rm = T)
+     par(mfrow=c(2, 2), oma=c(0,0,3,0))
+     boxplot(var_name, main="With outliers")
+     hist(var_name, main="With outliers", xlab=NA, ylab=NA)
+     outlier <- boxplot.stats(var_name)$out
+     mo <- mean(outlier)
+     var_name <- ifelse(var_name %in% outlier, NA, var_name)
+     boxplot(var_name, main="Without outliers")
+     hist(var_name, main="Without outliers", xlab=NA, ylab=NA)
+     title("Outlier Check", outer=TRUE)
+     na2 <- sum(is.na(var_name))
+     cat("Outliers identified:", na2 - na1, "n")
+     cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(var_name))*100, 1), "n")
+     cat("Mean of the outliers:", round(mo, 2), "n")
+     m2 <- mean(var_name, na.rm = T)
+     cat("Mean without removing outliers:", round(m1, 2), "n")
+     cat("Mean if we remove outliers:", round(m2, 2), "n")
+     
+          dt[as.character(substitute(var))] <- invisible(var_name)
+          assign(as.character(as.list(match.call())$dt), dt, envir = .GlobalEnv)
+          cat("Outliers successfully removed", "n")
+          return(invisible(dt))
+          return(invisible(var_name))
+}
+
+sig_digits <- 2
+sum_sd <- function(data, varname) {
+    eval(parse(text = str_c("data[, round(summary(", varname, "), digits=2)] %>% print()")))
+    eval(parse(text = str_c("print(str_c('SD: ', data[, sd(", varname, ", na.rm = T) %>% 
+                                round(sig_digits)]))")))
+}
+
+```
+
+# 1. Data wrangling
+## 1.1. Stats and Figures
+
+```{r 1.1.load_dat_res}
+
+# Biobank file provided by Meryl Stav
+# See asthma metabolomics rev code too
+# access restricted link
+# https://www.dropbox.com/home/Asthma/Biobank_Files/2020-05-04
+
+# we don't need this file for this analysis but anyway
+pb_all <- read.csv("../data/Asthma_Parameters_March24cutoff_2020-05-04.csv", as.is=TRUE, sep=",", 
+                   stringsAsFactors=FALSE)
+dim(pb_all)
+# All asthmatics based on PPV 0.90
+table(pb_all$Asthma...current.or.past.history..PPV.0.90...Existence..Yes.No..)
+
+# MGBB-Asthma processed metabolomics data, see asthma metabolomics code rev too
+load("../code_review/results/samp_mets_final_processed_with_pheno_MGBBA_1628803433.RData")
+dim(final_data)
+
+# cortisol data pull provided by Meryl Stav
+cort <- read.csv("../data/RPDR_cleaned_data_2020-02-13.csv", as.is=TRUE, sep=",",stringsAsFactors=FALSE)
+dim(cort)
+
+age <- ggplot(cort) + geom_histogram(aes(Age)) + labs(x="Age in years")
+cort.min <- ggplot(cort) + geom_histogram(aes(Cortisol_Overall_Min_Result)) + labs(x="Min Cortisol")
+cort.max <- ggplot(cort) + geom_histogram(aes(Cortisol_Overall_Max_Result)) + labs(x="Max Cortisol")
+cort.mean <- ggplot(cort) + geom_histogram(aes(Cortisol_Overall_Mean_Result)) + labs(x="Mean Cortisol")
+cort.median <- ggplot(cort) + geom_histogram(aes(Cortisol_Overall_Median_Result)) + labs(x="Median Cortisol")
+ICS.prescr.count <- ggplot(cort) + geom_histogram(aes(Any_Inhaled_Corticosteroids_most_common_prescription_total)) + labs(x="ICS prescription count")
+grid.arrange(age, cort.min, cort.max, cort.mean, cort.median, ICS.prescr.count, nrow = 2, ncol = 3)
+
+# Of these, we would have only 25 subjects with metabolomics data so we can not analyze cortisol metabolite measures in these few samples but anyway EMR data is there
+length(intersect(pb_all$Biobank.Subject.ID, cort$Biobank_Subject_ID))
+length(intersect(final_data$Biobank.Subject.ID, cort$Biobank_Subject_ID))
+
+######################################################
+# Removing 24 subjects with COPD, 2 have missing info
+######################################################
+cort.pb <- cort[!cort$COPD==1,]
+#cort.pb <- cort.pb[!cort.pb$COPD==1,]
+# Analyze min cortisol data
+cort.nonmiss <- cort.pb[!is.na(cort.pb$Cortisol_Overall_Min_Result), ]
+cort.nonmiss$Date_Time <- cort.nonmiss$Cortisol_Overall_Min_Result_Date_First
+
+# Split date and time, 26 subjects with missing time info
+cort.nonmiss$timeV1 <- as.POSIXct(strptime(cort.nonmiss$Cortisol_Overall_Min_Result_Date_First, format="%Y-%m-%d %H:%M"), tz = "EST")
+
+t <- separate(cort.nonmiss, Cortisol_Overall_Min_Result_Date_First, into = c("Min_Cortisol_Date", "Min_Cortisol_Time"), sep = " (?=[^ ]+$)")
+t <- t[!is.na(t$Min_Cortisol_Time),]
+
+# Gives same timings but with current date
+t$time <- as.POSIXct(strptime(t$Min_Cortisol_Time, format="%H:%M"))
+
+# It turns out there's no pure "time" object, so every time must also have a date, therefore you can strip date using the below, but it looses POSIXct class and becomes character, similar to Min_Cortisol_Time
+t$time_only <- format(as.POSIXct(t$timeV1,format='%Y-%m-%d %H:%M:%S'),format='%H:%M:%S')
+dim(t) # 2235 subjects
+t.sel<-t
+
+# Binning time series data
+# https://stackoverflow.com/questions/48144836/convert-timestamps-to-frequency-binned-timeseries-in-r?noredirect=1&lq=1
+
+###########################
+# Refining ICS category
+# based on no. of presc.
+###########################
+
+# 1583 NAs
+sum(is.na(t.sel$Any_Inhaled_Corticosteroids_most_common_prescription_total))
+
+# If we remove subjects with less than 10 prescriptions, we would be removing lot of subjects, follow section 2 for updated analysis
+table(t.sel$Any_Inhaled_Corticosteroids_most_common_prescription_total)
+
+##########################################################
+# subjects with 10 or more counts of ICS vs less than 10
+# we are still adding bias towards null by not removing subjects
+# but the ICS category would be more stringent
+##########################################################
+t.sel$ICS_cat[is.na(t.sel$Any_Inhaled_Corticosteroids_most_common_prescription_total)] <- 0
+
+t.sel$ICS_cat[t.sel$Any_Inhaled_Corticosteroids_most_common_prescription_total<10]<-0
+t.sel$ICS_cat[t.sel$Any_Inhaled_Corticosteroids_most_common_prescription_total>=10]<-1
+table(t.sel$ICS_cat)
+
+#####################################
+# Stratify by ICS and asthma now
+#####################################
+table(t.sel$Asthma)
+#   0    1 
+#1852  383 
+t.sel$Treatment_cat[t.sel$Asthma==0 & t.sel$ICS_cat==0]<-0
+
+# No asthma but taking ICS
+t.sel$Treatment_cat[t.sel$Asthma==0 & t.sel$ICS_cat==1]<-1
+
+# asthmatics but no anti-inflammatories
+t.sel$Treatment_cat[t.sel$Asthma==1 & t.sel$ICS_cat==0]<-2
+
+# Asthmatics taking ICS
+t.sel$Treatment_cat[t.sel$Asthma==1 & t.sel$ICS_cat==1]<-3
+table(t.sel$Treatment_cat)
+#   0    1    2    3 
+#1811   41  268  115 
+
+# Make categories with names
+#t.sel$Treatment<-NULL
+# No asthma and no ICS
+t.sel$Treatment[t.sel$Asthma==0 & t.sel$ICS_cat==0]<-"Controls_No_ICS"
+
+# No asthma but taking ICS
+t.sel$Treatment[t.sel$Asthma==0 & t.sel$ICS_cat==1]<-"Controls_ICS"
+
+# asthmatics but no anti-inflammatories
+t.sel$Treatment[t.sel$Asthma==1 & t.sel$ICS_cat==0]<-"Ast_No_ICS" 
+
+# Asthmatics taking ICS
+t.sel$Treatment[t.sel$Asthma==1 & t.sel$ICS_cat==1]<-"Ast_ICS"
+
+t.sel$Treatment_cat <- as.factor(t.sel$Treatment_cat)
+t.sel$Treatment <- as.factor(t.sel$Treatment)
+table(t.sel$Treatment)
+#        Ast_ICS      Ast_No_ICS    Controls_ICS Controls_No_ICS 
+#            115             268              41            1811 
+
+# make appropriate race categories
+t.sel$race[t.sel$Race =="Black-BLACK" | t.sel$Race == "BLACK OR AFRICAN AMERICAN" | t.sel$Race =="Hispanic Black-BLACK OR AFRICAN AMERICAN@HISPANIC"] <- 0
+t.sel$race[t.sel$Race =="Asian-ASIAN" | t.sel$Race == "Hawaiian-NATIVE HAWAIIAN OR OTHER PACIFIC ISLANDER" | t.sel$Race=="American Indian-AMERICAN INDIAN OR ALASKA NATIVE"] <- 1
+t.sel$race[t.sel$Race =="Hispanic-HISPANIC OR LATINO" | t.sel$Race == "Hispanic-HISPANIC OR LATINO@HISPANIC" | t.sel$Race=="Hispanic-OTHER@HISPANIC" | t.sel$Race=="Hispanic White-WHITE@HISPANIC" | t.sel$Race=="White-WHITE"] <- 2
+t.sel$race[t.sel$Race =="Not Recorded-@" | t.sel$Race == "Not Recorded-DECLINED" | t.sel$Race=="Not Recorded-NOT GIVEN" | t.sel$Race=="Not Recorded-UNKNOWN" | t.sel$Race=="Other-OTHER"] <- 3
+table(t.sel$race)
+
+t.sel.fr <- data.table(t.sel)
+
+# Summary stats for cortisol by presence and absence of asthma
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Asthma == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    2.20    6.00    6.99   10.10   48.30 
+#[1] "SD: 5.78"
+
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Asthma == 1]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    1.10    4.10    5.49    8.75   31.50 
+#[1] "SD: 5.19"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Asthma == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    8.90   13.40   14.59   18.80  154.50 
+#[1] "SD: 9.64"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Asthma == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.30    8.20   12.50   22.51   18.55 2510.00 
+#[1] "SD: 134.39"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Asthma == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    5.20    8.40    8.97   12.00   48.30 
+#[1] "SD: 5.68"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Asthma == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    3.60    7.20    7.61   10.25   31.50 
+#[1] "SD: 5.13"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Asthma == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    6.60    9.54   10.15   13.10   48.30 
+#[1] "SD: 5.45"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Asthma == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.30    5.57    8.80    9.97   11.54  213.15 
+#[1] "SD: 14.65"
+
+# Summary stats for cortisol by presence and absence of asthma and ICS intake
+# these stats are likely described in the manuscript
+# # 0: Controls_No_ICS; 1: Controls_ICS; 2: Ast_No_ICS; 3: Ast_ICS
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Treatment_cat == 0]")
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    2.30    6.00    7.02   10.15   48.30 
+#[1] "SD: 5.8"
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Treatment_cat == 1]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    1.40    4.70    5.58    8.30   18.90 
+#[1] "SD: 4.57"
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Treatment_cat == 2]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    1.37    5.20    6.03    9.10   25.50 
+#[1] "SD: 5.09"
+sum_sd(t.sel.fr, "Cortisol_Overall_Min_Result[Treatment_cat == 3]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    0.80    1.90    4.22    6.14   31.50 
+#[1] "SD: 5.22"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Treatment_cat == 0]")
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    8.90   13.40   14.62   18.85  154.50 
+#[1] "SD: 9.69"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Treatment_cat == 1]")
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   1.00    8.70   11.80   12.87   17.70   30.70 
+#[1] "SD: 6.71"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Treatment_cat == 2]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.50    8.30   12.45   23.26   18.35 2510.00 
+#[1] "SD: 152.74"
+sum_sd(t.sel.fr, "Cortisol_Overall_Max_Result[Treatment_cat == 3]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.30    7.35   12.80   20.78   18.70  831.00 
+#[1] "SD: 76.67"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Treatment_cat == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.10    5.20    8.50    9.01   12.00   48.30 
+#[1] "SD: 5.69"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Treatment_cat == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    3.60    6.80    7.15   10.20   18.90 
+#[1] "SD: 4.82"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Treatment_cat == 2]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.30    4.68    8.20    8.07   10.93   25.50 
+#[1] "SD: 4.97"
+sum_sd(t.sel.fr, "Cortisol_Overall_Median_Result[Treatment_cat == 3]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    2.60    5.20    6.53    9.15   31.50 
+#[1] "SD: 5.35"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Treatment_cat == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.20    6.70    9.58   10.19   13.10   48.30 
+#[1] "SD: 5.46"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Treatment_cat == 1]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.90    5.10    8.01    8.42   10.80   18.90 
+#[1] "SD: 4.38"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Treatment_cat == 2]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.45    6.36    9.35   10.03   12.05  186.23 
+#[1] "SD: 11.83"
+sum_sd(t.sel.fr, "Cortisol_Overall_Mean_Result[Treatment_cat == 3]")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.30    4.62    7.73    9.83   10.75  213.15 
+#[1] "SD: 19.78"
+
+```
+
+## 1.2. Table 1. MGBB-Cortisol Stats
+
+```{r 1.2.table1}
+
+# Table 1. Stats
+sum_sd(t.sel.fr, "Age")
+sum_sd(t.sel.fr, "Age[Asthma == 0]")
+sum_sd(t.sel.fr, "Age[Asthma == 1]")
+
+t.sel.fr[, .N, .(Gender)][, pct := (N/sum(N))*100] %>% print()
+t.sel.fr[, .N, .(race)][, pct := (N/sum(N))*100] %>% print()
+t.sel.fr[, .N, .(ICS_cat)][, pct := (N/sum(N))*100] %>% print()
+t.sel.fr[, .N, .(Any_adrenal_insufficiency_diagnosis)][, pct := (N/sum(N))*100] %>% print()
+
+#t.sel.fr[, .N, .(Asthma, Gender)][order(Asthma, Gender)][, pct := (N/sum(N))*100] %>% print()
+
+# stats for categorical variables by asthma status
+noast <- t.sel.fr[t.sel.fr$Asthma==0,]
+ast <- t.sel.fr[t.sel.fr$Asthma==1,]
+
+ast[, .N, .(Gender)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(Gender)][, pct := (N/sum(N))*100] %>% print()
+
+ast[, .N, .(race)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(race)][, pct := (N/sum(N))*100] %>% print()
+
+ast[, .N, .(Any_adrenal_insufficiency_diagnosis)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(Any_adrenal_insufficiency_diagnosis)][, pct := (N/sum(N))*100] %>% print()
+
+t.test(ast$Age, noast$Age) # p-value = 0.2045
+chisq.test(table(t.sel.fr$Asthma, t.sel.fr$Gender)) # p-value = 3.919e-14
+chisq.test(table(t.sel.fr$Asthma, t.sel.fr$race)) # p-value = 0.0014
+chisq.test(table(t.sel.fr$Asthma, t.sel.fr$ICS_cat)) # p-value < 2.2e-16
+chisq.test(table(t.sel.fr$Asthma, t.sel.fr$Any_adrenal_insufficiency_diagnosis)) # p-value = 0.02592
+
+```
+
+## 1.3. Anova and logistic regression models adjusted for confounders
+
+```{r 1.3.mod}
+
+# The ref group should be no asthma no ICS but just to see that asthmatics on
+# and off ICS are also different, I kept it this way, anova is a better way to
+# see to those differences as below but this is not adjusted so likely not so useful and we do not report these in the paper. In the paper, we report adjusted analyses (below)
+summary(aov(Cortisol_Overall_Min_Result ~ Treatment, data=t.sel))
+# trend:               Df Sum Sq Mean Sq F value   Pr(>F)    
+# Treatment            3   1061   353.7   11.01 3.57e-07 ***
+summary(lm(Cortisol_Overall_Min_Result ~ Treatment, data=t.sel))
+tu <- TukeyHSD(aov(t.sel$Cortisol_Overall_Min_Result ~ t.sel$Treatment))
+tu$`t.sel$Treatment`
+
+summary(aov(Cortisol_Overall_Max_Result ~ Treatment, data=t.sel))
+tu <- TukeyHSD(aov(t.sel$Cortisol_Overall_Max_Result ~ t.sel$Treatment))
+tu$`t.sel$Treatment`
+
+summary(aov(Cortisol_Overall_Median_Result ~ Treatment, data=t.sel))
+tu <- TukeyHSD(aov(t.sel$Cortisol_Overall_Median_Result ~ t.sel$Treatment))
+tu$`t.sel$Treatment`
+
+summary(aov(Cortisol_Overall_Mean_Result ~ Treatment, data=t.sel))
+tu <- TukeyHSD(aov(t.sel$Cortisol_Overall_Mean_Result ~ t.sel$Treatment))
+tu$`t.sel$Treatment`
+
+# also repeat the above pairwise comparisons as adjusted models
+t.sel$ICS_cat<-as.factor(t.sel$ICS_cat)
+t.sel$Asthma<-as.factor(t.sel$Asthma)
+t.sel$race <- as.factor(t.sel$race)
+t.sel$Age<-as.numeric(t.sel$Age)
+t.sel$Gender <- as.factor(t.sel$Gender)
+
+# 0: Controls_No_ICS; 1: Controls_ICS; 2: Ast_No_ICS; 3: Ast_ICS
+summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel))
+t.sel.comp1 <- t.sel[t.sel$Treatment=="Ast_ICS" | t.sel$Treatment=="Ast_No_ICS",]
+data.frame(coef(summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp1, family = "gaussian"))))
+kable(round(data.frame(coef(summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp1)))), digits=2))
+
+confint(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp1))
+kable(round(confint(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp1)), digits=2))
+
+t.sel.comp2 <- t.sel[t.sel$Treatment=="Ast_ICS" | t.sel$Treatment=="Controls_No_ICS",]
+data.frame(coef(summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp2))))
+kable(round(data.frame(coef(summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp2)))), digits=2))
+
+confint(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp2))
+kable(round(confint(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp2)), digits=2))
+
+t.sel.comp3 <- t.sel[t.sel$Treatment=="Ast_ICS" | t.sel$Treatment=="Controls_ICS",]
+data.frame(coef(summary(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp3))))
+confint(glm(Cortisol_Overall_Min_Result ~ Treatment_cat+Age+Gender+time+race, data=t.sel.comp3))
+
+# create time bins
+br <- data.frame(t.sel$time, cuts = cut(t.sel$time, breaks="1 hour", labels=FALSE))
+table(br$cuts)
+
+# bin people into these time intervals as there are less people in evening to early morning
+#03:00-10:00, 10:00-18:00, 18:00-03:00
+
+# did this because there are much less subjects from 6pm-3am
+#04:00-12:00, 12:00-18:00, 18:00-04:00
+#br$time_collect[br$cuts>=3 & br$cuts<10]<-"03:00-10:00"
+#br$time_collect[br$cuts>=10 & br$cuts<18]<-"10:00-18:00"
+#br$time_collect[br$cuts>=18]<-"18:00-03:00"
+#br$time_collect[br$cuts==1 | br$cuts==2]<-"18:00-03:00"
+
+# 9 people between 12-1am, 8 people from 1am-2am
+head(t.sel[order(t.sel$time),]$time, n=20)
+
+br$time_collect[br$cuts>=4 & br$cuts<12]<-1
+br$time_collect[br$cuts>=12 & br$cuts<18]<-2
+br$time_collect[br$cuts>=18]<-3
+br$time_collect[br$cuts==1 | br$cuts==2 | br$cuts==3]<-3
+
+table(br$time_collect)
+head(br[order(br$t.sel.time),])
+
+t.sel$time_collect <- br$time_collect
+t.sel$cuts <- br$cuts
+
+```
+
+## 1.4. Plots for Min Cortisol as most robust
+
+```{r 1.4.min_cort, warning=FALSE}
+
+# Shows cortisol shifts at every hour, was useful to make categories
+ggplot(t.sel, aes(x = time, y = Cortisol_Overall_Min_Result)) +
+    geom_smooth(aes(color = Treatment), method="loess", linetype=2, size = 1) +
+    scale_color_manual(values = c("red", "blue", "green", "purple")) +
+    scale_x_datetime( breaks=("1 hour"), minor_breaks=("1 hour"), labels=date_format("%H:%M")) + theme(axis.text.x = element_text(angle = 45))
+
+# Histogram used for manuscript
+thist <- gghistogram(t.sel, "time", xlab="Time (in hours)", ylab="Frequency of subjects", bins = 50, breaks="hours") + theme(axis.text.x = element_text())
+thist <- thist + clean_theme()
+
+bins <- ggplot(t.sel, aes(x = time_collect, y = Cortisol_Overall_Min_Result)) +
+         geom_smooth(aes(color = Treatment), method="loess", linetype=2, size = 1) +
+         scale_color_manual(values = c("red", "blue", "green", "purple")) + 
+         scale_x_continuous(name="Time of Sample Collection", labels = c("04:00", "", "04:00"), breaks=seq(1, 3, 1)) + scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + labs(title="", y="Average min cortisol levels", caption = "(Subjects are binned into 3 time categories:\n04:00-12:00, 12:00-18:00, 18:00-04:00)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.0, face = "bold")) + theme_classic()
+
+ggarrange(thist, bins, 
+ncol = 1, nrow = 2, 
+widths = c(2, 1), heights = c(1, 2),
+common.legend = TRUE)
+ggsave(file=file.path(plots.dir, "RPDR_hist_MGBB_cortisol_final_rev_manuscript.png"), width = 8, height = 9)
+
+```
+
+# 3. Session info
+
+```{r 3.session_info}
+
+gc()
+sessionInfo()
+
+```

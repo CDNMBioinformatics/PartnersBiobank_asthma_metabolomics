@@ -1,0 +1,479 @@
+---
+title: "MGBB RPDR Dose-response and ACTH-AI analysis"
+author: "Priyadarshini Kachroo"
+date: "08/12/2021"
+output: 
+  html_document:
+    code_folding: hide 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+# restart R session
+#.rs.restartR()
+rm(list=ls())
+
+## load libraries
+libs <- c("ggpubr", "gdata", "MASS", "gplots", "ggplot2", "gmodels", "knitr", "R.utils", "impute", "tidyr","scales", "sqldf","dplyr","tidyverse", "data.table", "gridExtra","lubridate", "markdown","foreign", "Hmisc", "reshape2", "lme4",
+          "magrittr", "Biobase", "splitstackshape", "matrixStats")
+
+for (l in libs) {
+        if (require(l, character.only = T)) {
+                print(paste0(l, " loaded successfully"))
+        } else {
+                install.packages(l)
+                require(l, character.only = T)
+                print(paste0(l, " installed and loaded successfully"))
+        }
+}
+
+## Paths
+setwd("/udd/reprk/projects/PartnersBiobank_asthma_metabolomics/scripts")
+plots.dir <- "../code_review/plots"
+# run this to knit the document
+
+#knit("template.Rmd")
+#markdownToHTML(file="template.md",output="template.html",header="<style>body {max-width: 2000px;}</style>")
+
+# Function modified from here
+# source("http://goo.gl/UUyEzD")
+outlierKD <- function(dt, var) {
+     var_name <- eval(substitute(var),eval(dt))
+     na1 <- sum(is.na(var_name))
+     m1 <- mean(var_name, na.rm = T)
+     par(mfrow=c(2, 2), oma=c(0,0,3,0))
+     boxplot(var_name, main="With outliers")
+     hist(var_name, main="With outliers", xlab=NA, ylab=NA)
+     outlier <- boxplot.stats(var_name)$out
+     mo <- mean(outlier)
+     var_name <- ifelse(var_name %in% outlier, NA, var_name)
+     boxplot(var_name, main="Without outliers")
+     hist(var_name, main="Without outliers", xlab=NA, ylab=NA)
+     title("Outlier Check", outer=TRUE)
+     na2 <- sum(is.na(var_name))
+     cat("Outliers identified:", na2 - na1, "n")
+     cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(var_name))*100, 1), "n")
+     cat("Mean of the outliers:", round(mo, 2), "n")
+     m2 <- mean(var_name, na.rm = T)
+     cat("Mean without removing outliers:", round(m1, 2), "n")
+     cat("Mean if we remove outliers:", round(m2, 2), "n")
+     
+          dt[as.character(substitute(var))] <- invisible(var_name)
+          assign(as.character(as.list(match.call())$dt), dt, envir = .GlobalEnv)
+          cat("Outliers successfully removed", "n")
+          return(invisible(dt))
+          return(invisible(var_name))
+}
+
+sig_digits <- 2
+sum_sd <- function(data, varname) {
+    eval(parse(text = str_c("data[, round(summary(", varname, "), digits=2)] %>% print()")))
+    eval(parse(text = str_c("print(str_c('SD: ', data[, sd(", varname, ", na.rm = T) %>% 
+                                round(sig_digits)]))")))
+}
+
+```
+
+# 1. Data wrangling
+## 1.1. Stats and Figures
+
+```{r 1.1.load_dat_res, warning=FALSE}
+
+#final_data <- read.table("../data/final_data_model_inh_oral.txt",
+#                         sep="\t", header=T)
+load("../code_review/results/samp_mets_final_processed_with_pheno_MGBBA_1628803433.RData")
+dim(final_data)
+
+doseinf <- read.csv(file="../data/RPDR_cleaned_data_plasma_5_years_2021-05-10.csv", sep=",", as.is=TRUE, stringsAsFactors=FALSE)
+dim(doseinf) # 8776
+setDT(doseinf)
+
+doseinf.metab <- merge(doseinf, final_data, by.x="Biobank_Subject_ID", by.y="Biobank.Subject.ID", sort=F)
+dim(doseinf.metab)
+#[1]  282 2236
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Beclomethasone_dipropionate_daily_dose_by_puffs_mcg)
+#     Yes 
+#273   9 
+table(doseinf.metab$Anti_inflammatories_inhalation_Beclomethasone_dipropionate_daily_dose_by_name_mcg_total_dosages)
+#1 2 3 4 8 
+#2 4 1 1 1 # 9 people have dosage info
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Beclomethasone_dipropionate_daily_dose_by_information_mcg)
+#    Yes 
+#271  11 
+table(doseinf.metab$Anti_inflammatories_inhalation_Beclomethasone_dipropionate_daily_dose_by_information_mcg_total_dosages)
+#1 2 3 4 8 
+#3 4 2 1 1 
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Budesonide_daily_dose_by_name_mcg)
+#    Yes 
+#255  27 
+table(doseinf.metab$Anti_inflammatories_inhalation_Budesonide_daily_dose_by_name_mcg_total_dosages)
+# 1  2  3  4  5  6  7  8 13 17 18 27 52 
+# 6  5  1  3  2  2  1  2  1  1  1  1  1 
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Budesonide_daily_dose_by_puffs_mcg_total_dosages)
+# 1  2  4  5  6  7  8 13 17 18 27 52 
+# 5  6  4  2  2  1  2  1  1  1  1  1
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Budesonide_daily_dose_by_information_mcg)
+#    Yes 
+#250  32 
+table(doseinf.metab$Anti_inflammatories_inhalation_Budesonide_daily_dose_by_information_mcg_total_dosages)
+# 1  2  4  5  6  7  8 12 13 14 17 19 28 53 
+# 4  6  3  4  3  2  3  1  1  1  1  1  1  1
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Ciclesonide_daily_dose_by_name_mcg)
+#    Yes 
+#281   1 
+table(doseinf.metab$Anti_inflammatories_inhalation_Dexamethasone_daily_dose_by_name_mcg)
+#    Yes 
+#279   3
+
+# Flunisolide all missing; no dose info
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Mometasone_daily_dose_by_name_mcg)
+#    Yes 
+#280   2 
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Mometasone_daily_dose_by_puffs_mcg)
+#    Yes 
+#280   2
+
+# Triamcinolone: all missing
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg)
+#    Yes 
+#180 102 
+
+# Fluticasone (102-120) and Budenoside (~27-32) have the max info available for subjects
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_most_common_prescription_total)
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_total_dosages)
+# 1  2  3  4  5  6  7  8  9 10 11 12 13 15 16 17 20 21 22 23 24 28 31 36 37 70 
+#25 14 10  5  5  7  4  3  2  2  6  1  1  2  3  1  1  1  1  1  2  1  1  1  1  1 
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg)  # 103
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_total_dosages)
+#  1  2  3  4  5  6  7  8  9 10 11 13 15 16 17 20 22 24 28 30 31 36 37 70 
+# 24 12 11  8  5  7  4  3  2  2  6  1  3  3  1  2  1  2  1  1  1  1  1  1 
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg) # 120
+
+table(doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_total_dosages)
+#  1  2  3  4  5  6  7  8  9 10 11 13 15 16 17 18 20 21 22 24 29 30 31 36 37 70 
+# 29 12 14 11  6  6  5  4  3  2  7  1  2  4  1  2  1  1  1  2  1  1  1  1  1  1 
+
+#View(doseinf.metab %>% dplyr::select(Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_mean_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_min_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_max_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_median_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_mean_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_min_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_max_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_median_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_mean_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_min_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_max_dosage, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_median_dosage))
+
+#View(doseinf.metab %>% dplyr::select(Plasma_Existence_Yes_No_To_6_30_2020, Plasma_Count_To_6_30_2020, Plasma_Date_First_To_6_30_2020, Plasma_Date_Most_Recent_To_6_30_2020, First_Collection_Date, Last_Collection_Date, nCollection_Dates, All_Collection_Dates, Plasma_First_Minus_5_Years))
+
+#View(doseinf.metab %>% dplyr::select(Plasma_Date_First_To_6_30_2020, First_Collection_Date, Plasma_First_Minus_5_Years, Anti_inflammatories_inhalation_Fluticasone_total_dates, Anti_inflammatories_inhalation_Fluticasone_dates, Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_all_dosages))
+
+# cortisol: X1712
+# cortisone: X1769
+
+########################################################################################
+# Since Fluticasone is the most commonly available or has most data, we go with this
+# creating variables, these are counts of the prescription dosages, one can sort of also count the dates to know the number of times a medicine has been prescribed or taken
+########################################################################################
+doseinf.metab$counts_dosage_presc_name <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_total_dosages
+table(doseinf.metab$counts_dosage_presc_name)
+doseinf.metab$counts_dosage_presc_puffs <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_total_dosages
+doseinf.metab$counts_dosage_presc_info <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_total_dosages
+
+########################################################
+# quantitative variables for actual dosage value in mcg
+########################################################
+
+# name
+doseinf.metab$dosage_name_mean_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_mean_dosage
+doseinf.metab$dosage_name_median_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_median_dosage
+doseinf.metab$dosage_name_min_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_min_dosage
+doseinf.metab$dosage_name_max_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_name_mcg_max_dosage
+
+# puffs
+doseinf.metab$dosage_puffs_mean_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_mean_dosage
+doseinf.metab$dosage_puffs_median_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_median_dosage
+doseinf.metab$dosage_puffs_min_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_min_dosage
+doseinf.metab$dosage_puffs_max_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_puffs_mcg_max_dosage
+
+# information
+doseinf.metab$dosage_info_mean_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_mean_dosage
+doseinf.metab$dosage_info_median_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_median_dosage
+doseinf.metab$dosage_info_min_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_min_dosage
+doseinf.metab$dosage_info_max_quant <- doseinf.metab$Anti_inflammatories_inhalation_Fluticasone_daily_dose_by_information_mcg_max_dosage
+
+# dosage by name: mean, median, min, max
+d.mean <- ggplot(doseinf.metab) + geom_histogram(aes(dosage_name_mean_quant), bins=50) + labs(x="dosage_name_mean_quant")
+d.med <- ggplot(doseinf.metab) + geom_histogram(aes(dosage_name_median_quant), bins=50) + labs(x="dosage_name_median_quant")
+d.min <- ggplot(doseinf.metab) + geom_histogram(aes(dosage_name_min_quant), bins=50) + labs(x="dosage_name_min_quant")
+d.max <- ggplot(doseinf.metab) + geom_histogram(aes(dosage_name_max_quant), bins=50) + labs(x="dosage_name_max_quant")
+
+p <- grid.arrange(d.mean, d.med, d.min, d.max, nrow = 2, ncol = 2)
+ggsave(p, file=file.path(plots.dir, "hist_name_summary_stats.png"), width = 9, height = 9)
+
+```
+
+## 1.2. Quantitative dose-response
+
+```{r 1.2.quant_dose, warning=FALSE}
+
+# Quantitative results for cortisol
+cortisol.mod <- lm(X1712~dosage_name_median_quant+counts_dosage_presc_name+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# Quantitative results for cortisone
+cortisone.mod <- lm(X1769~dosage_name_median_quant+counts_dosage_presc_name+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+setDT(doseinf.metab)
+# 180 missing, data on 102 subjects for fluticasone, others don't have as much info
+sum_sd(doseinf.metab, "dosage_name_mean_quant")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#     44     100     110     120     110     320     180 
+#[1] "SD: 58.48"
+
+sum_sd(doseinf.metab, "dosage_name_median_quant")
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#     44     110     110     119     110     250     180 
+#[1] "SD: 58.17"
+
+```
+
+## 1.3. Test-trend dose-response ordinal
+
+```{r 1.3.trend_dose, warning=FALSE}
+
+# dose response in categories of average median dose, we use median since some dosages can cause deviations/skewness based on mean
+# # By Name: only 4 subjects in >220 category and also as per GINA guidelines 200 mcg as threshold makes sense
+
+doseinf.metab$dosage_name_median_quantV1 <- doseinf.metab$dosage_name_median_quant
+
+# we are doing this so that there is one category (reference) of subjects where none of the asthmatics have ICS dosages - by name, puffs or info
+
+doseinf.metab$dosage_name_median_quantV1[is.na((doseinf.metab$dosage_name_median_quant) | (doseinf.metab$dosage_puffs_median_quant) | (doseinf.metab$dosage_info_median_quant))] <- 0
+
+# there are likely 18 subjects which do not have ICS info for name_median but may have some based on puffs or information, which would not be included then for analysis
+summary(doseinf.metab$dosage_name_median_quant)
+summary(doseinf.metab$dosage_name_median_quantV1)
+
+# But the no’s vary a lot for who takes ICS and who not, so I am just using Any iCS until March 24, 2020 and those with zero ICS (n=42) will be considered no ICS
+table(doseinf.metab$Any.ICS.total.To.3.24.2020., doseinf.metab$dosage_name_median_quantV1)
+
+table(doseinf.metab$Any_Inhaled_Corticosteroids_most_common_prescription_total, doseinf.metab$dosage_name_median_quantV1)
+
+doseinf.metab$dosage_name_median_cat[doseinf.metab$Any.ICS.total.To.3.24.2020.==0] <- 0
+doseinf.metab$dosage_name_median_cat[doseinf.metab$dosage_name_median_quant<=200]<-1
+doseinf.metab$dosage_name_median_cat[doseinf.metab$dosage_name_median_quant>200]<-2
+table(doseinf.metab$dosage_name_median_cat)
+# 0  1  2 
+#42 82 20 
+doseinf.metab.fil = filter(doseinf.metab, !(doseinf.metab$Any.ICS.total.To.3.24.2020. %in% c(1,2,3)))
+table(doseinf.metab.fil$dosage_name_median_cat)
+# 0  1  2 
+#42 74 20 
+
+# Test for trend for dose-response as ordinal variable
+
+# cortisol
+cortisol.mod <- lm(X1712~dosage_name_median_cat+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# cortisone
+cortisone.mod <- lm(X1769~dosage_name_median_cat+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+
+```
+
+## 1.4. Dose-response categorical
+
+```{r 1.4.dose_cat, warning=FALSE}
+
+# Test for dose-response as categorical variable
+doseinf.metab$dosage_name_median_cat <- as.factor(doseinf.metab$dosage_name_median_cat)
+
+# cortisol
+cortisol.mod <- lm(X1712~dosage_name_median_cat+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisol.mod)
+taba <- data.frame(coef(summary(cortisol.mod)))
+a.ci <- confint(cortisol.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# cortisone
+cortisone.mod <- lm(X1769~dosage_name_median_cat+Age.x+Sex+RACE_cat+Smoking+BMI.y, data=doseinf.metab)
+summary(cortisone.mod)
+taba <- data.frame(coef(summary(cortisone.mod)))
+a.ci <- confint(cortisone.mod)
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+```
+
+# 2. ACTH AI data stats
+
+```{r 2.acth, warning=FALSE}
+
+acth <- read.csv(file="../data/RPDR_cleaned_data_ACTH_adrenal_2021-06-21.csv", sep=",", as.is=TRUE, stringsAsFactors=FALSE)
+dim(acth)
+
+# FOR ACTH: look at percentage of fatigue and those that have symptoms
+table(acth$OneYearBeforeTest_Unspecified_adrenocortical_insufficiency)
+table(acth$OneYearBeforeTest_Corticoadrenal_insufficiency)
+table(acth$OneYearBeforeTest_Primary_adrenocortical_insufficiency)
+table(acth$OneYearBeforeTest_Any_Adrenal_Fatigue)
+table(acth$OneYearBeforeTest_Any_Fatigue)
+table(acth$OneYearBeforeTest_Any_Adrenal_insufficiency)
+table(acth$OneYearBeforeTest_Any_Anemia)
+table(acth$OneYearBeforeTest_Any_Weight_Loss)
+table(acth$OneYearBeforeTest_Any_Hyperpigmentation)
+table(acth$OneYearBeforeTest_Any_Lightheadedness) # too few subjects
+
+setDT(acth)
+
+acth.fat <- table(acth$OneYearBeforeTest_Any_Adrenal_insufficiency, acth$OneYearBeforeTest_Any_Adrenal_Fatigue)
+acth.fat
+round(100*prop.table(acth.fat),digits=2)
+
+# where we have data on AI and other clinical symptoms
+acth.AI <- acth[!(is.na(acth$OneYearBeforeTest_Any_Adrenal_insufficiency) | acth$OneYearBeforeTest_Any_Adrenal_insufficiency==""), ]
+
+acth.AI$Any_Inhaled_Corticosteroids_most_common_prescription_total[is.na(acth.AI$Any_Inhaled_Corticosteroids_most_common_prescription_total)] <- 0
+
+acth.AI$race[acth.AI$Race =="Black-BLACK" | acth.AI$Race == "BLACK OR AFRICAN AMERICAN" | acth.AI$Race =="Hispanic Black-BLACK OR AFRICAN AMERICAN@HISPANIC"] <- 0
+acth.AI$race[acth.AI$Race =="Asian-ASIAN" | acth.AI$Race == "Hawaiian-NATIVE HAWAIIAN OR OTHER PACIFIC ISLANDER" | acth.AI$Race=="American Indian-AMERICAN INDIAN OR ALASKA NATIVE"] <- 1
+acth.AI$race[acth.AI$Race =="Hispanic-HISPANIC OR LATINO" | acth.AI$Race == "Hispanic-HISPANIC OR LATINO@HISPANIC" | acth.AI$Race=="Hispanic-OTHER@HISPANIC" | acth.AI$Race=="Hispanic White-WHITE@HISPANIC" | acth.AI$Race=="White-WHITE"] <- 2
+acth.AI$race[acth.AI$Race =="Not Recorded-@" | acth.AI$Race == "Not Recorded-DECLINED" | acth.AI$Race=="Not Recorded-NOT GIVEN" | acth.AI$Race=="Not Recorded-UNKNOWN" | acth.AI$Race=="Other-OTHER"] <- 3
+acth.AI$race <- as.factor(acth.AI$race)
+table(acth.AI$race)
+#   0    1    2    3 
+# 209   46 2308  154 
+
+acth.AI$Gender <- as.factor(acth.AI$Gender)
+acth.AI$Smoker_Former_or_Current <- as.factor(acth.AI$Smoker_Former_or_Current)
+acth.AI$FiveYearsBeforeTest_Any_Fatigue <- as.factor(acth.AI$FiveYearsBeforeTest_Any_Fatigue)
+acth.AI$FiveYearsBeforeTest_Any_Weight_Loss <- as.factor(acth.AI$FiveYearsBeforeTest_Any_Weight_Loss)
+acth.AI$FiveYearsBeforeTest_Any_Anemia <- as.factor(acth.AI$FiveYearsBeforeTest_Any_Anemia)
+acth.AI$FiveYearsBeforeTest_Any_Hyperpigmentation <- as.factor(acth.AI$FiveYearsBeforeTest_Any_Hyperpigmentation)
+acth.AI$FiveYearsBeforeTest_Any_Adrenal_insufficiency <- as.factor(acth.AI$FiveYearsBeforeTest_Any_Adrenal_insufficiency)
+
+acth.AI.4 = filter(acth.AI, !(acth.AI$Any_Inhaled_Corticosteroids_most_common_prescription_total %in% c(1,2,3)))
+acth.AI.4$ICS_cat4ormore[acth.AI.4$Any_Inhaled_Corticosteroids_most_common_prescription_total<1]<-0
+
+acth.AI.4$ICS_cat4ormore[acth.AI.4$Any_Inhaled_Corticosteroids_most_common_prescription_total>=4]<-1
+
+acth.AI.4$ICS_cat4ormore <- as.factor(acth.AI.4$ICS_cat4ormore)
+table(acth.AI.4$ICS_cat4ormore)
+#   0    1 
+# 585 1362 
+
+# Five years before/Within last 5 years 
+setDT(acth.AI.4)
+acth.AI.4[, .N, .(ICS_cat4ormore, FiveYearsBeforeTest_Any_Adrenal_insufficiency)][order(ICS_cat4ormore, FiveYearsBeforeTest_Any_Adrenal_insufficiency)][, pct := (N/sum(N))*100] %>% print()
+
+acth.AI.4.noics <- acth.AI.4[acth.AI.4$ICS_cat4ormore==0,]
+acth.AI.4.ics <- acth.AI.4[acth.AI.4$ICS_cat4ormore==1,]
+
+acth.AI.4.ics[, .N, .(FiveYearsBeforeTest_Any_Fatigue)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.noics[, .N, .(FiveYearsBeforeTest_Any_Fatigue)][, pct := (N/sum(N))*100] %>% print()
+
+acth.AI.4.ics[, .N, .(FiveYearsBeforeTest_Any_Weight_Loss)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.noics[, .N, .(FiveYearsBeforeTest_Any_Weight_Loss)][, pct := (N/sum(N))*100] %>% print()
+
+acth.AI.4.ics[, .N, .(FiveYearsBeforeTest_Any_Hyperpigmentation)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.noics[, .N, .(FiveYearsBeforeTest_Any_Hyperpigmentation)][, pct := (N/sum(N))*100] %>% print()
+
+acth.AI.4.ics[, .N, .(FiveYearsBeforeTest_Any_Anemia)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.noics[, .N, .(FiveYearsBeforeTest_Any_Anemia)][, pct := (N/sum(N))*100] %>% print()
+
+acth.AI.4.ics[, .N, .(FiveYearsBeforeTest_Any_Adrenal_insufficiency)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.noics[, .N, .(FiveYearsBeforeTest_Any_Adrenal_insufficiency)][, pct := (N/sum(N))*100] %>% print()
+
+sum_sd(acth.AI.4, "Age")
+sum_sd(acth.AI.4, "BMI_average")
+
+acth.AI.4.ics[, .N, .(Smoker_Former_or_Current)][, pct := (N/sum(N))*100] %>% print()
+acth.AI.4.ics[, .N, .(race)][, pct := (N/sum(N))*100] %>% print()
+
+# Fatigue
+fat <- glm(FiveYearsBeforeTest_Any_Fatigue~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4, family="binomial")
+summary(fat)
+taba <- data.frame(coef(summary(fat)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(fat))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# Weight Loss
+wl <- glm(FiveYearsBeforeTest_Any_Weight_Loss~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4, family="binomial")
+summary(wl)
+taba <- data.frame(coef(summary(wl)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(wl))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# Anemia
+an <- glm(FiveYearsBeforeTest_Any_Anemia~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4, family="binomial")
+summary(an)
+taba <- data.frame(coef(summary(an)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(an))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# Hyperpigmentation
+hyp <- glm(FiveYearsBeforeTest_Any_Hyperpigmentation~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4, family="binomial")
+summary(hyp)
+taba <- data.frame(coef(summary(hyp)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(hyp))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# Adrenal insufficiency
+ai <- glm(FiveYearsBeforeTest_Any_Adrenal_insufficiency~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4, family="binomial")
+summary(ai)
+taba <- data.frame(coef(summary(ai)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(ai))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+# ICS prescriptions (does not make sense to do this though)
+ics.presc <- lm(Any_Inhaled_Corticosteroids_most_common_prescription_total~ICS_cat4ormore+Age+Gender+race+Smoker_Former_or_Current+BMI_average, data=acth.AI.4)
+summary(ics.presc)
+taba <- data.frame(coef(summary(ics.presc)))
+taba$OR <- exp(taba$Estimate)
+a.ci <- exp(confint(ics.presc))
+kable(round(taba, digits=4));kable(round(a.ci, digits=2))
+
+sum_sd(acth.AI.4.noics, "Any_Inhaled_Corticosteroids_most_common_prescription_total")
+sum_sd(acth.AI.4.ics, "Any_Inhaled_Corticosteroids_most_common_prescription_total")
+
+t.test(acth.AI.4.ics$Any_Inhaled_Corticosteroids_most_common_prescription_total, acth.AI.4.noics$Any_Inhaled_Corticosteroids_most_common_prescription_total)
+```
+
+# 3. Session info
+
+```{r 3.session_info}
+
+sessionInfo()
+
+```

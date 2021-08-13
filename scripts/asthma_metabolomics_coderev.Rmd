@@ -1,0 +1,1324 @@
+---
+title: "asthma metabolomics analysis"
+author: "Priyadarshini Kachroo, Channing Lab, BWH"
+date: "08/12/2021"
+output: 
+  html_document: 
+    code_folding: hide
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=TRUE}
+
+rm(list=ls())
+setwd("/udd/reprk/projects/PartnersBiobank_asthma_metabolomics/scripts")
+
+### METABOLON DATA
+
+# As informed and files provided by Rachel Kelly that came from Metabolon
+## Using tab: OrigScale' this is the unscaled and unimputed data - scaling, normalisation
+## and imputation will be performed according to the channing pipeline
+## this dataset is split into two csv files
+# 'metabolites_PB_info.csv':metabolite infomation and metabolite intensities
+# 'pheno_PB_metab.csv': phenotype information for the participants
+
+libs <- c("R.utils", "moments", "gdata", "gplots", "grid", "foreign", "ggplot2", "MASS", "Hmisc", "reshape2", "lme4", "dplyr", "magrittr", "stringr", "gridExtra", "lattice", "data.table", "tidyverse", "scales", "harrypotter", "e1071", "DT", "readxl", "ggrepel")
+
+for (l in libs) {
+  if (require(l, character.only = T)) {
+    print(paste0(l, " loaded successfully"))
+  } else {
+    install.packages(l)
+    require(l, character.only = T)
+    print(paste0(l, " installed and loaded successfully"))
+  }
+}
+
+# library needed for paretoscale, but this package does not seem to work with R v. 3.6.3: error: compilation failed for randomForest, so copied the function
+#library("RFmarkerDetector")
+
+# Save result files with timeStamp
+timeStamp <- as.character(round(unclass(Sys.time())))
+print(timeStamp)
+
+paretoscale <- function(data, exclude = T) {
+    
+    if (exclude == T) {
+        # Here we extract numeric data and perform Pareto scaling
+        sample_classes <- data[, 1:2]
+        x <- data[, 3:dim(data)[2]]
+    } else {
+        sample_classes <- NULL
+        x <- data
+    }
+    # Here we perform centering
+    x.centered <- apply(x, 2, function(x) x - mean(x))
+    # Then we perform scaling on the mean-centered matrix
+    x.sc <- apply(x.centered, 2, function(x) x/sqrt(sd(x)))
+    x.sc <- cbind(sample_classes, x.sc)
+    
+}
+
+## Function to show summary stats and standard deviation together
+sig_digits <- 1
+sum_sd <- function(data, varname) {
+    eval(parse(text = str_c("data[, round(summary(", varname, "), digits=1)] %>% print()")))
+    eval(parse(text = str_c("print(str_c('SD: ', data[, sd(", varname, ", na.rm = T) %>% 
+                                round(sig_digits)]))")))
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Data locations
+## 1.1. Data Loading and prep
+
+```{r 1.1.load_dat}
+
+project.dir = "/udd/reprk/projects/PartnersBiobank_asthma_metabolomics"
+data.dir = file.path(project.dir, "data")
+results.dir = file.path(project.dir, "code_review/results")
+regeps.dir = "/proj/regeps/regep00/studies/CAMP"
+plots.dir = file.path(project.dir, "code_review/plots")
+
+# these files were provided by Rachel Kelly, files from Metabolon
+data<-read.csv(file=file.path(data.dir, "metabolites_PB_info_input.csv"),
+               as.is=TRUE, sep="\t", stringsAsFactors=FALSE)
+epi<-read.csv(file=file.path(data.dir, "pheno_PB_metab_input.csv"),
+              as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+
+# date restriction for MGBB-Asthma phenotype data: March 24th, 2020
+# Meryl Stav - Bioinformatics team did biobank pulls
+# The file is located here (restricted access controlled by Meryl):
+# https://www.dropbox.com/sh/i1pvgpgzhstbf70/AAD8Bed1QnMo395Xvd1rbjrua?dl=0
+
+# this link just highlights which folder:
+# https://www.dropbox.com/home/Asthma%20Data/05-04-2020
+
+# EPIC_Norfolk data files received from Claudia/Isobel and results
+epic_hmdbs <- read.csv(file.path(data.dir, "EpicNorfolk_asthma_ma_formatted_mets_HMDB1.csv"),
+                       as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+epic <- read_excel(file.path(data.dir, "EpicNorfolk_asthma_ma_formatted.xlsx"))
+epic_annot <- read_excel(file.path(data.dir, "EpicNorfolk_asthma_ma_formatted_mets_class.xlsx"), 
+                         sheet = 3)
+
+# MGBB-Asthma phenotype file parameters
+MGBB_updated <- read.csv(file=file.path(data.dir,
+          "Asthma_Parameters_March24cutoff_2020-05-04.csv"),
+              as.is=TRUE, sep=",", stringsAsFactors=FALSE)
+
+```
+
+# 2. Data wrangling and preprocessing
+## 2.1. Quality checks and metabolite filtering
+
+```{r 2.1.dat_qual}
+
+dim(data)
+dim(epi)
+# look at metabolites by platform
+table(data$PLATFORM)
+
+#look at metabolites by super pathway
+table(data$SUPER.PATHWAY)
+
+# Determine the sub pathways the xenobiotics belong to 
+xenobiotics<-subset(data, SUPER.PATHWAY=="Xenobiotics")
+table(xenobiotics$SUB.PATHWAY)
+
+# Data wrangling to remove commas in between numbers
+data[1:4,14:16]
+col2cvt <- 14:642
+data[,col2cvt] <- lapply(data[,col2cvt],function(data){as.numeric(gsub(",", "", data))})
+
+data2 <- data
+data2[1:3,14:16]
+# We didn't remove xenobiotics from our dataset
+# data2<-subset(data, SUPER.PATHWAY!="Xenobiotics")
+
+# Use COMP_ID to identify the features but make a separate file containing
+#all the metabolite info - for remerging when needed
+# create a COMP_ID with an X in front so R doesn't recognize it
+#as a number (COMP_ID identifies the metabolites)
+# In Rachel's file, COMP_ID should be replaced by COMP.ID
+
+data2$X<-paste(rep("X"))
+data2$met_id<-paste(data2$X,data2$COMP.ID, sep = "") 
+rownames(data2)<-data2$met_id
+dim(data2) # The column numbers in next line depend on the dim here
+
+# Work on phenotype file read before as needed
+dim(epi)
+names <- epi$SAMPLE.NAME
+length(names)
+sample_name <- colnames(epi)
+length(sample_name)
+
+epi_t <- as.data.frame(t(epi))
+epi_t = epi_t[-1,]
+colnames(epi_t) <- names
+epi_t$SAMPLE.NAME <- rownames(epi_t)
+colnames(data2)[14:642] <- epi_t$SAMPLE.NAME
+
+# Work on metabolite info file as needed
+metabolite_info<-data2[c(1:13)]
+
+##############
+## MISSINGNESS
+##############
+
+### Find the % of missing values for each metabolite
+# select sample columns carefully
+data2[1:2,13:15]; data2[1:2,640:644]
+missingness<-data2[c(14:642)]
+metabolite_missingness<-rowMeans(is.na(missingness))
+
+# also shows some metabolites have very high missingness
+summary(metabolite_missingness)
+metabolite_missingness <- as.data.frame(metabolite_missingness)
+
+### Find the % of missing values for each sample
+sample_missingness<-colMeans(is.na(missingness))
+summary(sample_missingness)
+
+# Plot distributions of sample and metabolite missingness
+samp.miss <- ggplot(data.frame(sample_missingness)) + geom_histogram(aes(sample_missingness), bins=50) + labs(x="Sample missingness")
+met.miss <- ggplot(data.frame(metabolite_missingness)) + geom_histogram(aes(metabolite_missingness), bins=50) + labs(x="Metabolite missingness")
+grid.arrange(samp.miss, met.miss, nrow = 1, ncol = 2)
+
+# determine if you want a subject missingness cut off?
+sample_missingness<-as.data.frame(sample_missingness)
+sample_miss_25<-subset(sample_missingness, sample_missingness>=0.25)
+dim(sample_miss_25) # 296
+head(sample_miss_25)
+data3<-data2[c(14:642)]
+data4<-as.data.frame(t(data3))
+rownames<-as.data.frame(rownames(data4))
+data2 <- NULL; data3<-NULL
+
+#################################################################################
+# Remove metabolite features where all values are missing for a particular sample
+#################################################################################
+data4b<-Filter(function(x)!all(is.na(x)), data4)
+rowNAs <- rowSums(is.na(data4b))
+colNAs <- sapply(data4b, function(x) sum(is.na(x)))
+
+summary(rowNAs) # max=385
+#   Min. 1st Qu.  Median    Mean 3rd Qu.   Max. 
+#  165.0   229.0   256.0   258.7   287.0   385.0 
+# samples with missing data for 385 metabolites
+rowNAs[rowNAs==385]
+#HARV.09044 
+#       385 
+       
+summary(colNAs) # max=628
+#    Min. 1st Qu.  Median    Mean 3rd Qu.  Max. 
+#    0.0     2.0    60.0   157.5   252.0   628.0 
+colNAs[colNAs==628]
+# some metabolites with missing data in 628 subjects, means all except one
+# may not make sense to analyze these metabolites if they pop up later
+# some may even be missing for 627 so we may want to filter out later metabolites with >50% missingness in all samples, for now we just impute them
+#X57673 X52949 X57703 X52958 X53241 
+#   628    628    628    628    628
+
+##############################################
+# impute missing values with half the minimum
+# as per Rachel's original pipeline
+##############################################
+impute.med <- function(x) replace(x, is.na(x), (min(x, na.rm = TRUE)/2))
+met_data <- sapply(data4b, function(x){
+  if(is.numeric(x)){
+    impute.med(x)
+  } else {
+    x
+  }
+}
+)
+
+# N=629 samples, N=1033 metabolites before any filtering
+met_data<-as.data.frame(met_data)
+dim(met_data)
+
+met_data<-cbind(rownames, met_data)
+rownames(met_data)<-met_data[,1]
+met_data<-met_data[c(2:1034)]
+
+# remove all those with a single value for the subsequent steps-uninformative
+# delete any with a single value if you have (min is 0)
+min<-as.data.frame(sapply(met_data, min, na.rm=TRUE))
+max<-as.data.frame(sapply(met_data, max, na.rm=TRUE))
+min_max<-merge(min,max, by="row.names")
+colnames(min_max)<-c("metabolite", "min", "max")
+min_max$dif<-min_max$max-min_max$min
+min_max_0<-subset(min_max, min_max$dif==0)
+dim(min_max_0)
+
+# add info to the metabolite information summary file
+
+# Look at the variance of the features
+# Calculate interquartile range
+# metabolites with no variance are uninformative
+
+iqr<-apply(met_data, 2, IQR, na.rm=T)
+iqr<-as.data.frame(iqr)
+summary(iqr)
+
+#If you want to see how many of them have 0 IQR
+# I commented it out, bcoz it occupies too much space on document
+#iqr[order(-iqr$iqr),,drop=FALSE]
+
+###############################################################
+# Remove 129 metabolites with zero IQR later in postprocessing
+###############################################################
+
+length(iqr[iqr$iqr==0,]) # 129
+
+# add to metabolite summary file
+metabolite_summary<-merge(metabolite_info, iqr, by="row.names")
+metabolite_summary$met_ID<-metabolite_summary$Row.names
+metabolite_summary$Row.names<-NULL
+
+skewness<-apply(met_data, 2, skewness, na.rm=T)
+skewness<-as.data.frame(skewness)
+summary(skewness)
+
+# merge with metabolite summary information
+skewness$met_ID<-rownames(skewness)
+metabolite_summary<-merge(metabolite_summary, skewness, by="met_ID")
+
+# Did same as above with IQR, commented out this step as it prints skewness for all metabolites
+#skewness[order(-skewness$skewness),,drop=FALSE]
+
+#####################################################
+# determine how many have a skewness greater than >2,
+#or <-2 (defined as non-normally distributed)
+#####################################################
+
+skew_2<-subset(skewness, skewness>=2|skewness<=-2)
+dim(skew_2)
+# [1] 826   2
+# Most of metabolites are non normally distributed
+
+######################################################
+# all data should be log transformed and paretoscaled
+######################################################
+
+dim(met_data)
+# 629 1033
+
+##############################
+## log transform all features
+##############################
+mets_final<-log10(met_data[,1:1033]+1)
+
+#######################################
+## pareto scale the features
+## pareto scaling = mean-centered and divided by the square root
+#of standard deviation of each variable
+#######################################
+mets_final<-as.data.frame(paretoscale(mets_final, exclude=FALSE))
+dim(mets_final)
+# [1]  629  1033
+
+pca_met<-prcomp(mets_final, scale. = TRUE)
+
+# I commented this step out too bcoz it prints all ~600 PCs..
+#   summary(pca_met) # Std Dev.
+
+#### first principal component explains 7-8% of the variance in the data,
+#### first 10 components in total ~54%
+
+# May be plotting it is better
+# Eigenvalues
+eig <- (pca_met$sdev)^2
+
+# Variances in percentage
+var <- eig*100/sum(eig)
+
+# Cumulative variances
+cumvar <- cumsum(var)
+
+eig.var <- data.frame(eig = eig, variance = var,
+                     cumvariance = cumvar)
+head(eig.var)
+
+# For entire data use this part, but it looks very condensed
+#barplot(eig.var[, 2], names.arg=1:nrow(eig.var), 
+#       main = "Variances",
+#       xlab = "Principal Components",
+#       ylab = "Percentage of variances",
+#       col ="steelblue")
+#lines(x = 1:nrow(eig.var), 
+#      eig.var[, 2], 
+#      type="b", pch=19, col = "red")
+
+# Summary
+fit<-summary(pca_met)
+pca<-as.data.frame(fit$x)
+pca<-as.data.frame(pca[c(1:10)])
+
+pca_epi<-merge(epi_t, pca, by="row.names")
+dim(pca_epi) # [1] 629  53
+pca_epi$Row.names <- NULL
+
+rownames(pca_epi)<-pca_epi$SAMPLE.NAME
+
+##################################
+# Create all pre-filtering plots
+##################################
+par(mfrow=c(2, 3))
+plot(rank(iqr[["iqr"]],ties.method='first', na.last=1),iqr[["iqr"]],
+     xlab="rank", ylab="IQR", main="Interquartile Range\n(pre filtering)")
+
+plot(rank(skewness[["skewness"]],ties.method='first', na.last=1),
+     skewness[["skewness"]], xlab="rank", ylab="skewness", main="skewness Range\n(pre filtering)")
+
+# visualise the pre-scaled and normalised data in a box and whisker plot
+my.dat<-met_data[c(1:1033)]
+tmp <- boxplot(my.dat, plot=FALSE, range=0)
+plot( range(tmp$stats), c(1,length(my.dat)), xlab='Peak Intensity',
+      ylab='Metabolite ID', type='n', main="pre-scaled and pre-filtering")
+segments( tmp$stats[1,], seq_along(my.dat), tmp$stats[2,] )
+segments( tmp$stats[4,], seq_along(my.dat), tmp$stats[5,] )
+points( tmp$stats[3,], seq_along(my.dat) )                    
+
+# Plotting only for first 10 PCs
+barplot(eig.var[1:10, 2], names.arg=1:10, 
+       main = "Variances\n(before data filtering)",
+       xlab = "Principal Components",
+       ylab = "Percentage of variances",
+       col ="steelblue")
+
+# Add connected line segments to the plot
+lines(x = 1:10, 
+      eig.var[1:10, 2], 
+      type="b", pch=19, col = "red")
+
+# The outliers seem to be HARV.09250, HARV.09405, HARV.08846
+# after discussion, they did not seem problematic
+plot(pca_epi$PC1, pca_epi$PC2,text(pca_epi$PC1, pca_epi$PC2, row.names(pca_epi)),
+     cex=0.8, main="Before data filtering")
+
+```
+
+## 2.2. After data filtering
+
+```{r 2.2.dat_post_fil}
+
+###################
+# After filtering
+# same QC steps
+###################
+
+# Delete metabolites with zero IQR and repeat QC
+# N=629 samples, N=904 metabolites after filtering
+d <- iqr[(iqr$iqr==0),]; length(d) # 129
+keep = !(iqr$iqr %in% d)
+iqr$met_ID <- rownames(iqr)
+iqr_sel <- iqr[keep,]
+summary(iqr_sel)
+
+# met_IDs to delete
+del = iqr$iqr %in% d
+iqr_del <- iqr[del,]
+met_del <- iqr_del$met_ID
+
+# add to metabolite summary file
+metabolite_summary2<-merge(metabolite_info, iqr_sel, by="row.names")
+#metabolite_summary$met_ID<-metabolite_summary$Row.names
+metabolite_summary2$Row.names<-NULL
+
+#mets_final2<-mets_final[,!colnames(mets_final) %in% met_del]
+met_data2<-met_data[,!colnames(met_data) %in% met_del]
+dim(met_data2)
+
+iqr2<-apply(met_data2, 2, IQR, na.rm=T)
+iqr2<-as.data.frame(iqr2)
+
+skewness2<-apply(met_data2, 2, skewness, na.rm=T)
+skewness2<-as.data.frame(skewness2)
+summary(skewness2) # didn't change much though
+
+# merge with metabolite summary information
+skewness2$met_ID<-rownames(skewness2)
+metabolite_summary2<-merge(metabolite_summary2, skewness2, by="met_ID")
+
+# Did same as above with IQR, commented out this step as it prints skewness for all metabolites
+#skewness[order(-skewness$skewness),,drop=FALSE]
+
+# determine how many have a skewness greater than >2,
+#or <-2 (defined as non-normally distributed)
+skew_2b<-subset(skewness2, skewness2>=2|skewness2<=-2)
+dim(skew_2b)
+# [1] 697   2
+# Reduced the number but still lot so we do log transform
+# all data should be log transformed
+
+dim(met_data2)
+# [1]  629 904
+
+##############################
+# log transform all features
+##############################
+mets_final2<-log10(met_data2[,1:904]+1)
+
+###############################
+# pareto scale the features
+# pareto scaling = mean-centered and divided by the square root
+#of standard deviation of each variable
+###############################
+mets_final2<-as.data.frame(paretoscale(mets_final2, exclude=FALSE))
+dim(mets_final2)
+# [1]  629  904
+
+pca_met2<-prcomp(mets_final2, scale. = TRUE)
+
+# May be plotting it is better
+# Eigenvalues
+eig <- (pca_met2$sdev)^2
+
+# Variances in percentage
+var <- eig*100/sum(eig)
+
+# Cumulative variances
+cumvar <- cumsum(var)
+
+eig.var <- data.frame(eig = eig, variance = var,
+                     cumvariance = cumvar)
+head(eig.var)
+
+# For entire data use this part, but it looks very condensed
+#barplot(eig.var[, 2], names.arg=1:nrow(eig.var), 
+#       main = "Variances",
+#       xlab = "Principal Components",
+#       ylab = "Percentage of variances",
+#       col ="steelblue")
+#lines(x = 1:nrow(eig.var), 
+#      eig.var[, 2], 
+#      type="b", pch=19, col = "red")
+
+# Summary
+fit<-summary(pca_met2)
+pca<-as.data.frame(fit$x)
+pca<-as.data.frame(pca[c(1:10)])
+
+pca_epi<-merge(epi_t, pca, by="row.names")
+dim(pca_epi) # [1] 629  53
+pca_epi$Row.names <- NULL
+
+rownames(pca_epi)<-pca_epi$SAMPLE.NAME
+
+##################################
+# Create all post-filtering plots
+##################################
+par(mfrow=c(2, 3))
+# Post-process iqr
+plot(rank(iqr2[["iqr2"]],ties.method='first', na.last=1),iqr2[["iqr2"]],
+     xlab="rank", ylab="IQR after postprocessing", main="Interquartile Range\n(post filtering)")
+
+plot(rank(skewness2[["skewness2"]],ties.method='first', na.last=1),
+     skewness2[["skewness2"]], xlab="rank", ylab="skewness postprocessing", main="skewness Range\n(post filtering)")
+
+# visualise the pre-scaled, normalised and filtered data in a box and whisker plot
+my.dat2<-met_data2[c(1:904)]
+tmp2 <- boxplot(my.dat2, plot=FALSE, range=0)
+plot( range(tmp2$stats), c(1,length(my.dat2)), xlab='Peak Intensity after IQR filtering',
+      ylab='Metabolite ID', type='n', main="Post data filtering")
+segments( tmp2$stats[1,], seq_along(my.dat2), tmp2$stats[2,] )
+segments( tmp2$stats[4,], seq_along(my.dat2), tmp$stats[5,] )
+points( tmp2$stats[3,], seq_along(my.dat2) )  
+
+# Plotting only for first 10 PCs
+barplot(eig.var[1:10, 2], names.arg=1:10, 
+       main = "Variances\n (post data filtering)",
+       xlab = "Principal Components",
+       ylab = "Percentage of variances",
+       col ="steelblue")
+
+# Add connected line segments to the plot
+lines(x = 1:10, 
+      eig.var[1:10, 2], 
+      type="b", pch=19, col = "red")
+
+plot(pca_epi$PC1, pca_epi$PC2,text(pca_epi$PC1, pca_epi$PC2, row.names(pca_epi)),
+     cex=0.8, main="Post data filtering")
+
+###########################
+# STATS
+# Table S2: By Platform
+###########################
+table(metabolite_summary2$PLATFORM)
+
+# percentages by platform
+round(508/904*100, digits=1) # 56.2
+round(83/904*100, digits=1) # 9.2
+round(242/904*100, digits=1) # 26.8
+round(71/904*100, digits=1) # 7.9
+
+# Table S2: By Super-pathway
+table(metabolite_summary2$SUPER.PATHWAY)
+
+# percentages by super-pathway
+round(184/904*100, digits=1) # 20.4
+round(108/904*100, digits=1) # 11.9
+round(24/904*100, digits=1) # 2.7
+round(178/904*100, digits=1) # 19.7
+round(29/904*100, digits=1) # 3.2
+round(31/904*100, digits=1) # 3.4
+round(9/904*100, digits=1) # 1
+round(29/904*100, digits=1) # 3.2
+round(3/904*100, digits=1) # 0.3
+round(309/904*100, digits=1) # 34.2
+
+```
+
+## 2.3. Epidemiological variables driving clustering, Table 1 stats
+
+```{r 2.3.dat_cluster}
+
+# MGBB_updated file read in data loading section above
+
+MGBB_updated$Smoking = ifelse(MGBB_updated$Smoker..Count..To.3.24.2020.==0, 0, 1)
+MGBB_updated$Smoking <- as.factor(MGBB_updated$Smoking)
+table(MGBB_updated$Smoking)
+
+# Check this format
+pca_epi$`CLIENT IDENTIFIER`<- as.character(pca_epi$`CLIENT IDENTIFIER`)
+pca_epi$`CUSTOMER SUBJ` <- as.character(pca_epi$`CUSTOMER SUBJ`)
+
+ids <- pca_epi %>%
+  dplyr::select(`CLIENT IDENTIFIER`, `CUSTOMER SUBJ`) %>%
+  mutate(len = sapply(`CLIENT IDENTIFIER`, nchar), BIOBANK = `CLIENT IDENTIFIER`)
+ids[which(ids$len != 8),] <- ids[which(ids$len != 8),] %>% mutate(BIOBANK = `CUSTOMER SUBJ`)
+pca_epi$Biobank.Subject.ID = as.integer(ids$BIOBANK)
+length(ids$BIOBANK)
+
+# as per metabolomics data, no subjects with missing sex
+table(pca_epi$GENDER)
+
+# as per biobank, 2 subjects with missing sex info, will go with more complete data in MGBB
+table(MGBB_updated$Gender)
+
+epi_final = merge(pca_epi, MGBB_updated,by.x="Biobank.Subject.ID", 
+                  by="Biobank.Subject.ID", sort=F)
+dim(epi_final)
+
+###
+
+# 2 subjects are missing all info in the Biobank file so removing them
+# Biobank subject IDs: 10006256, 10051692
+epi_final[epi_final$Gender=="",]$Biobank.Subject.ID
+
+epi_final <- epi_final[!epi_final$Gender=="",]
+
+epi_final$Sex[epi_final$Gender=="F"] <- "F"
+epi_final$Sex[epi_final$Gender=="M"] <- "M"
+table(epi_final$Sex)
+epi_final$Sex<-as.factor(epi_final$Sex)
+
+epi_final$RACE_cat[epi_final$Race == "Asian"] <- "Asian"
+epi_final$RACE_cat[epi_final$Race == "Black"] <- "Black"
+epi_final$RACE_cat[epi_final$Race == "White"] <- "White"
+epi_final$RACE_cat[epi_final$Race == "Other"] <- "Others"
+epi_final$RACE_cat[epi_final$Race == "Unknown"] <- "Others"
+
+epi_final$RACE_cat<-as.factor(epi_final$RACE_cat)
+table(epi_final$RACE_cat)
+epi_final$Age <- as.numeric(epi_final$Age)
+epi_final$BMI <- as.numeric(epi_final$Body.Mass.Index..BMI...Average.Value..To.3.24.2020.)
+
+# Define asthma as subjects with PPV greater than 0.85
+table(epi_final$Asthma..Count..To.3.24.2020.)
+table(epi_final$Asthma...current.or.past.history..custom.PPV......0.80PPV...List.of.All.Values..To.3.24.2020.)
+
+#pb.final <- epi_final[epi_final$Asthma...current.or.past.history..custom.PPV......0.80PPV...List.of.All.Values..To.3.24.2020. == "" | epi_final$Asthma...current.or.past.history..custom.PPV......0.80PPV...List.of.All.Values..To.3.24.2020.>0.82, ]
+#epi_final$Asthma...current.or.past.history..custom.PPV......0.80PPV...Count..To.3.24.2020. <- as.numeric(epi_final$Asthma...current.or.past.history..custom.PPV......0.80PPV...Count..To.3.24.2020.)
+pb.final <- epi_final
+ast <- gsub("\\[|\\]", "", pb.final$Asthma...current.or.past.history..custom.PPV......0.80PPV...Count..To.3.24.2020.)
+pb.final$ASTHMA <- as.numeric(ast)
+#pb.final$ASTHMA = ifelse(pb.final$Asthma...current.or.past.history..custom.PPV......0.80PPV...List.of.All.Values..To.3.24.2020.>0.84, 1, 0)
+pb.final$ASTHMA <- as.factor(pb.final$ASTHMA)
+table(pb.final$ASTHMA)
+rownames(pb.final)<-pb.final$SAMPLE.NAME
+
+##################################################
+# Defining ICS cut-offs
+# none + <4 prescription counts vs. 4 or more
+##################################################
+
+# Any ICS
+table(pb.final$Any.ICS.To.3.24.2020.) # No ICS: 348, Any ICS: 254; 25 missing info
+summary(pb.final$Any.ICS.To.3.24.2020.)
+
+# Making ICS definition more stringent, comparable to some extent with the RPDR analysis
+# if we remove subjects with <4 prescription counts
+table(pb.final$Any.ICS.total.To.3.24.2020.)
+remove <- na_if(pb.final$Any.ICS.total.To.3.24.2020., 1)
+remove <- na_if(remove, 2); remove <- na_if(remove, 3)
+summary(remove) # 90 subjects (includes 25 NAs)
+remove <- data.frame(remove)
+
+# If you remove the subjects with 1, 2 or 3 medications and define ICS as subjects with 4 or more medications vs. no medications, we get rid of 65 subjects which is a lot, so for now I just put them to no ICS category
+#pb.final$remove <- remove
+#pb.final <- pb.final[!is.na(pb.final$remove),] 
+#pb.final$ICS_4more = ifelse(pb.final$remove>=4, "Yes","No")
+#pb.final$ICS_4more <- as.factor(pb.final$ICS_4more)
+
+# Therefore, we don't remove them, and just move them to no ICS category (bias towards null)
+# subjects with 4 or more medications vs. subjects with <4 counts + no ICS
+pb.final$ICS_4more[pb.final$Any.ICS.total.To.3.24.2020.==0] <- 0
+pb.final$ICS_4more[pb.final$Any.ICS.total.To.3.24.2020.==1] <- 0
+pb.final$ICS_4more[pb.final$Any.ICS.total.To.3.24.2020.==2] <- 0
+pb.final$ICS_4more[pb.final$Any.ICS.total.To.3.24.2020.==3] <- 0
+pb.final$ICS_4more[pb.final$Any.ICS.total.To.3.24.2020.>3] <- 1
+pb.final$ICS_4more <- as.factor(pb.final$ICS_4more)
+table(pb.final$ASTHMA, pb.final$ICS_4more)
+
+# remove 9 controls on ICS, can use subset(dat, y==1 & z!=0) too
+#      0   1
+#  0 323   9
+#  1  90 180
+
+pb.final.dat<-pb.final[!(pb.final$ASTHMA==0 & pb.final$ICS_4more==1),]
+
+# there are 8 subjects having COPD with acute exacerbation
+# Again, EPIC-Norfolk had excluded any subjects with COPD (if any), as mentioned in previous emails from Claudia, dated February 09, 2018 (to Jessica & Rachel, forwarded to me)
+table(pb.final.dat$Chronic.obstructive.pulmonary.disease.with..acute..exacerbation..Count..To.3.24.2020.)
+pb.final.dat <- subset(pb.final.dat, Chronic.obstructive.pulmonary.disease.with..acute..exacerbation..Count..To.3.24.2020.!=1 & Chronic.obstructive.pulmonary.disease.with..acute..exacerbation..Count..To.3.24.2020.!=2 & Chronic.obstructive.pulmonary.disease.with..acute..exacerbation..Count..To.3.24.2020.!=3)
+table(pb.final.dat$Chronic.obstructive.pulmonary.disease.with..acute..exacerbation..Count..To.3.24.2020.)
+
+table(pb.final.dat$ASTHMA, pb.final.dat$ICS_4more)
+
+mets_final3<-merge(pb.final.dat, mets_final2, by="row.names", sort=F)
+mets_final3$Row.names<-NULL
+dim(mets_final3) # 610 1172
+
+# Further data wrangling
+final_data <- mets_final3
+
+mets_data <- final_data[,269:1172]
+phenoMGBB <- final_data[,1:268]
+
+#################################
+# Stats for Table 1 - MGBB-Asthma
+#################################
+
+#pdf(file = file.path(plots.dir, "age_distribution.pdf"),
+#    width = 5, height = 5)
+ggplot(final_data) + geom_histogram(aes(Age), bins=20) + 
+  labs(x="Age distribution (in years)")
+#dev.off()
+
+final_data.dt <- final_data
+setDT(final_data.dt)
+# Median/Mean/min/max age in non asthmatics
+sum_sd(final_data.dt, "Age")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   13.0    30.0    33.0    32.7    37.0    43.0 
+#[1] "SD: 5.3"
+
+sum_sd(final_data.dt, "Age[ASTHMA == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   22.0    30.0    33.0    32.4    35.0    39.0 
+#[1] "SD: 3.7"
+
+sum_sd(final_data.dt, "Age[ASTHMA == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   13.0    29.0    34.0    33.1    38.0    43.0 
+#[1] "SD: 6.6"
+
+sum_sd(final_data.dt, "BMI")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#    2.7    21.7    24.1    25.6    27.5    64.1       7 
+#[1] "SD: 6.5"
+
+sum_sd(final_data.dt, "BMI[ASTHMA == 0]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#    2.7    21.4    23.0    23.2    24.8    41.3       3 
+#[1] "SD: 3.1"
+
+sum_sd(final_data.dt, "BMI[ASTHMA == 1]")
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#   13.7    22.2    26.5    28.3    32.5    64.1       4 
+#[1] "SD: 8"
+
+ast <- final_data.dt[final_data.dt$ASTHMA==1,]
+noast <- final_data.dt[final_data.dt$ASTHMA==0,]
+
+final_data.dt[, .N, .(Sex)][order(Sex)][, pct := (N/sum(N))*100] %>% print()
+final_data.dt[, .N, .(ASTHMA, Sex)][order(ASTHMA, Sex)][, pct := (N/sum(N))*100] %>% print()
+ast[, .N, .(Sex)][order(Sex)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(Sex)][order(Sex)][, pct := (N/sum(N))*100] %>% print()
+
+final_data.dt[, .N, .(RACE_cat)][order(RACE_cat)][, pct := (N/sum(N))*100] %>% print()
+final_data.dt[, .N, .(ASTHMA, RACE_cat)][order(ASTHMA, RACE_cat)][, pct := (N/sum(N))*100] %>% print()
+ast[, .N, .(RACE_cat)][order(RACE_cat)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(RACE_cat)][order(RACE_cat)][, pct := (N/sum(N))*100] %>% print()
+
+final_data.dt[, .N, .(ICS_4more)][order(ICS_4more)][, pct := (N/sum(N))*100] %>% print()
+final_data.dt[, .N, .(ASTHMA, ICS_4more)][order(ASTHMA, ICS_4more)][, pct := (N/sum(N))*100] %>% print()
+ast[, .N, .(ICS_4more)][order(ICS_4more)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(ICS_4more)][order(ICS_4more)][, pct := (N/sum(N))*100] %>% print()
+
+final_data.dt[, .N, .(Smoking)][order(Smoking)][, pct := (N/sum(N))*100] %>% print()
+final_data.dt[, .N, .(ASTHMA, Smoking)][order(ASTHMA, Smoking)][, pct := (N/sum(N))*100] %>% print()
+ast[, .N, .(Smoking)][order(Smoking)][, pct := (N/sum(N))*100] %>% print()
+noast[, .N, .(Smoking)][order(Smoking)][, pct := (N/sum(N))*100] %>% print()
+
+# Compare categories
+t.test(Age ~ ASTHMA, data = final_data, var.equal = TRUE) # P=0.1136
+t.test(BMI ~ ASTHMA, data = final_data, var.equal = TRUE) # P < 2.2e-16
+
+table(final_data$Sex)
+tab <- table(final_data$Sex, final_data$ASTHMA)
+chisq.test(tab) # P=1.99e-10
+
+table(final_data$RACE_cat)
+tab <- table(final_data$RACE_cat, final_data$ASTHMA)
+chisq.test(tab) # P=0.009791
+
+table(final_data$ICS_4more)
+tab <- table(final_data$ICS_4more, final_data$ASTHMA)
+chisq.test(tab) # P < 2.2e-16
+
+table(final_data$Smoking)
+tab <- table(final_data$Smoking, final_data$ASTHMA)
+chisq.test(tab) # P=0.001184
+
+#pdf(file = file.path(plots.dir, "PCA1_PCA2_ASTHMA.pdf"),
+#    width = 10, height = 8)
+colors=c("black","red")
+col = colors[as.factor(final_data$ASTHMA)]
+plot(final_data$PC1, final_data$PC2, col=col, xlab="PC1",
+     ylab="PC2",main="ASTHMA", pch=19, cex=1.5)
+legend("bottomright", legend=levels(factor(final_data$ASTHMA)),
+       text.col=seq_along(levels(factor(final_data$ASTHMA))), cex=1.2)
+#dev.off()
+
+#pdf(file = file.path(plots.dir, "PCA1_PCA2_SMOKER.pdf"),
+#    width = 10, height = 8)
+colors=c("black","red")
+col = colors[as.factor(final_data$Smoking)]
+plot(final_data$PC1, final_data$PC2, col=col, xlab="PC1",
+     ylab="PC2",main="SMOKING", pch=19, cex=1.5)
+legend("bottomright", legend=levels(factor(final_data$Smoking)),
+       text.col=seq_along(levels(factor(final_data$Smoking))), cex=1.2)
+#dev.off()
+
+#pdf(file = file.path(plots.dir, "PCA1_PCA2_SEX.pdf"),
+#    width = 10, height = 8)
+colors=c("black","red")
+col = colors[as.factor(final_data$Sex)]
+plot(final_data$PC1, final_data$PC2, col=col, xlab="PC1",
+     ylab="PC2",main="SEX", pch=19, cex=1.5)
+legend("bottomright", legend=levels(factor(final_data$Sex)),
+       text.col=seq_along(levels(factor(final_data$Sex))), cex=1.2)
+#dev.off()
+
+#pdf(file = file.path(plots.dir, "PCA1_PCA2_race.pdf"),
+#    width = 10, height = 8)
+colors=c("black","red","green","blue")
+col = colors[as.factor(epi_final$RACE_cat)]
+plot(epi_final$PC1, epi_final$PC2, col=col, xlab="PC1",
+     ylab="PC2",main="RACE", pch=19, cex=1.5)
+legend("bottomright", legend=levels(factor(epi_final$RACE_cat)),
+       text.col=seq_along(levels(factor(epi_final$RACE_cat))), cex=1.2)
+#dev.off()
+
+#######################
+# Numbers for Table S2
+#######################
+
+#pdf(file.path(data.dir, "plots/PB_piechart_platformv1.pdf"),width = 7, height = 6)
+plat <- data.frame(table(metabolite_summary2$PLATFORM))
+plat
+lbls=as.character(plat$Var1)
+slices <- plat$Freq; pct <- round(slices/sum(slices)*100)
+pct <- paste(pct,"%",sep="");pct;pie(slices, radius=0.7, labels = pct, main = "Pie Chart by platform", col = rainbow(length(lbls)))
+legend("topright", c("LC/MS Neg", "LC/MS Polar", "LC/MS Pos-Early", "LC/MS Pos-Late"), cex = 0.8, fill = rainbow(length(lbls)))
+#dev.off()
+
+#look at metabolites by super pathway (for Supplementary Table)
+path <- data.frame(table(metabolite_summary2$SUPER.PATHWAY)); path
+slices <- path$Freq
+lbls <- as.character(path$Var1)
+lbls[1] <- c("Unannotated")
+
+#pdf(file.path(data.dir, "plots/PB_piechart_super-pathwayv1.pdf"), 
+#    width = 11, height = 14)
+pct <- round(slices/sum(slices)*100)
+pct <- paste(pct,"%",sep="");pct;pie(slices, radius=0.9, labels = pct, main = "Metabolites by super-pathway", col = rainbow(length(lbls)))
+legend("bottomleft", c("Unannotated", "Amino Acid", "Carbohydrate", "Cofactors and Vitamins", "Energy", "Lipid", "Nucleotide", "Partially Characterized Molecules", "Peptide", "Xenobiotics"), cex = 0.8, fill = rainbow(length(lbls)))
+#dev.off()
+
+```
+
+## 2.4. EPIC_Norfolk data input and processing
+
+```{r 2.4.epic_data}
+
+# Epidemiological variables - Table 1 - received from Claudia
+# I did calculate the pvalues for some variables
+sm_asm <- as.table(rbind(c(4704, 308), c(4267, 306), c(1122, 47)))
+dimnames(sm_asm) <- list(smoking = c("Never", "Former", "Current"),
+                         asthma = c("No","Yes"))
+chisq.test(sm_asm) # pvalue = 1
+
+sex_asm <- as.table(rbind(c(5383, 376), c(4710, 285)))
+dimnames(sex_asm) <- list(sex = c("No", "Yes"),
+                    asthma = c("No","Yes"))
+chisq.test(sex_asm) # p=0.08
+
+race_asm <- as.table(rbind(c(8, 1), c(10029, 655), c(8,1), c(8,1)))
+dimnames(race_asm) <- list(race = c("AfricanAmerican", "white", "Asian", "Others"),
+                    asthma = c("No","Yes"))
+chisq.test(race_asm) # P=0.76
+
+# Using the EPIC file received from Claudia, filter the metabolites associated with asthma outcome
+
+epic_as <- epic[epic$yvar=="asthma_prev",]
+dim(epic_as)
+
+# not for paper, we finally used all metabolites, but kept code here for legacy
+epic_named <- epic_as[!grepl("X - ", epic_as$xvar),]
+dim(epic_named) # 858/1316 named metabolites with annotations
+
+# Take named + unnamed QCed metabolites only in batches 2 and 3, rest should be discarded
+dim(epic_as[epic_as$batches==1,])
+epic_as_batchfilter <- epic_as[!epic_as$batches==1,]
+dim(epic_as_batchfilter) # 973 (including 9 named metabs from Greg, metabolon in batches 2 & 3)
+
+```
+
+## 2.4.1 Significant Asthma associations in EPIC-Norfolk - Table S1
+
+```{r 2.4.1.TableS1}
+
+# Table S1 (currently Table S3) update as per order of appearance in the text
+epic_as_batchfilter.sig <- 
+  epic_as_batchfilter[epic_as_batchfilter$p<5.138746e-05,] # 35 at bonferroni (0.05/973)
+
+# shows results in a table
+DT::datatable(epic_as_batchfilter.sig, filter = 'top')
+
+```
+
+## 2.4.2 Top associations EPIC-Norfolk - Figure S1A_B
+
+```{r 2.4.2.epic_figureS1A_B}
+
+# duplicate sub pathway annotations in the epic file for metabolites. There are around 140+ such metabolites who have duplicate pathway information. This doesn’t affect the way Manhattan plot looks since I plotted super pathway info but may affect if we want to look at sub pathways too for instance.
+
+# 147 duplicates in epic annotation file
+dim(epic_annot[duplicated(epic_annot$BIOCHEMICAL), ])
+epic_annot[epic_annot$BIOCHEMICAL=="cortisone", ]
+epic_annot[epic_annot$BIOCHEMICAL=="cortisol", ]
+epic_annot[epic_annot$BIOCHEMICAL=="dehydroisoandrosterone sulfate (DHEA-S)", ]
+
+# removes duplicated metabolites, but how do I know which one has to be removed? This code will keep the first encounter and remove rest duplicates, however sometimes first instance seems to have the correct/more explanatory sub pathway, sometimes, its the second instance
+
+# For now I have removed duplicates, since the manhattan plot won't have issues with this. The p-value will not change and if we plot super pathway, it would be same
+epic_annot.nondup <- epic_annot[!duplicated(epic_annot$BIOCHEMICAL), ]
+
+# epic_as has metabolites specific to asthma outcome with batch 1
+epic_as[duplicated(epic_as$xvar), ]  # 1 unannotated duplicate in epic_as
+# epic_as_batchfilter has metabolites specific to asthma outcome without batch 1
+epic_as_batchfilter[duplicated(epic_as_batchfilter$xvar), ]  # 0 unannotated duplicate in epic_as_batchfilter
+epic_as.nondup <- epic_as_batchfilter[!duplicated(epic_as_batchfilter$xvar), ]
+epic_as.ann <- merge(epic_as.nondup, epic_annot.nondup, by.x="xvar", by.y="BIOCHEMICAL", sort=F)
+epic_as.ann$SUPER_PATHWAY <- as.character(epic_as.ann$SUPER_PATHWAY)
+epic_as.ann$SUB_PATHWAY <- as.character(epic_as.ann$SUB_PATHWAY)
+
+epic_as.ann$SUPER_PATHWAY[epic_as.ann$SUPER_PATHWAY==""] <- "NA"
+epic_as.ann$SUPER_PATHWAY[epic_as.ann$SUPER_PATHWAY=="NA"] <- "Unannotated"
+epic_as.ann$SUPER_PATHWAY[is.na(epic_as.ann$SUPER_PATHWAY)]<-"Unannotated"
+epic_as.ann$SUB_PATHWAY[epic_as.ann$SUB_PATHWAY==""] <- "NA"
+epic_as.ann$SUB_PATHWAY[epic_as.ann$SUB_PATHWAY=="NA"] <- "Unannotated"
+epic_as.ann$SUPER_PATHWAY[is.na(epic_as.ann$SUB_PATHWAY)]<-"Unannotated"
+
+epic_as.ann.ord <- epic_as.ann[with(epic_as.ann, order(SUPER_PATHWAY, SUB_PATHWAY)), ]
+
+epic_as.ann.ord$minus_log10_Pvalue <- -log10(epic_as.ann.ord$p)
+rownames(epic_as.ann.ord) <- NULL
+epic_as.ann.ord$pos <- rownames(epic_as.ann.ord)
+
+epic_as.ann.ord$SUPER_PATHWAY <- as.factor(epic_as.ann.ord$SUPER_PATHWAY)
+epic_as.ann.ord$SUB_PATHWAY <- as.factor(epic_as.ann.ord$SUB_PATHWAY)
+epic_as.ann.ord$OR[epic_as.ann.ord$or>1]<-">1"
+epic_as.ann.ord$OR[epic_as.ann.ord$or<1]<-"<1"
+epic_as.ann.ord$OR <- as.factor(epic_as.ann.ord$OR)
+
+# add metabolite names to the ones identified by metabolon
+epic_as.ann.ord$xvar <- gsub("[*]","" , epic_as.ann.ord$xvar ,ignore.case = TRUE)
+#metabolite_summary2$BIOCHEMICAL <- gsub("[*]","" , metabolite_summary2$BIOCHEMICAL,ignore.case = TRUE)
+
+epic_as.ann.ord$xvar <- gsub('X - 21364', 'steroid conjugate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 11444', 'tetrahydrocortisol glucuronide*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 12846', '11beta-hydroxyandrosterone glucuronide*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 12844', 'steroid conjugate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 17359', 'cortolone glucuronide*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 11440', 'pregnenetriol disulfate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 22379', 'androsterone glucuronide*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 24544', '17-hydroxypregnenolone sulfate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 17357', 'steroid conjugate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 17340', 'steroid conjugate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 21470', '5-androstenetriol disulfate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 11470', 'tetrahydrocorticosterone glucuronide*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 15492', 'steroid conjugate*', epic_as.ann.ord$xvar)
+epic_as.ann.ord$xvar <- gsub('X - 24546', '16a-hydroxy-DHEA-disulfate*', epic_as.ann.ord$xvar)
+
+#epic_as.ann.ord$SUPER_PATHWAY[epic_as.ann.ord$xvar=="steroid conjugate*"] <- "Lipid"
+
+# Some of the unannotated ones are steroids so they cluster with lipids?
+pdf(file = file.path(plots.dir, "manhattan_EPIC.pdf"),
+    width = 12, height = 8)
+ggplot(epic_as.ann.ord, aes(x=pos, y=minus_log10_Pvalue)) + 
+  geom_point(aes(colour=SUPER_PATHWAY, fill=SUPER_PATHWAY, shape=OR), size=3) + scale_shape_manual(values = c(25, 24), breaks = c("<1", ">1")) +
+    geom_hline(yintercept = 1.30103) + 
+    geom_hline(yintercept = 4.293282) + 
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank()) + 
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+dev.off()
+
+# with names
+ggplot(epic_as.ann.ord, aes(x=pos, y=minus_log10_Pvalue)) + 
+  geom_point(aes(colour=SUPER_PATHWAY, fill=SUPER_PATHWAY, shape=OR), size=3) + scale_shape_manual(values = c(25, 24), breaks = c("<1", ">1")) +
+    geom_hline(yintercept = 1.30103) + 
+    geom_hline(yintercept = 4.293282) + 
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank()) + 
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  geom_text_repel(data = subset(epic_as.ann.ord, p < 5.09e-05),
+    aes(label = xvar),
+    size = 3,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.3, "lines"))
+
+pdf(file = file.path(plots.dir, "manhattan_EPIC_with_names.pdf"),
+    width = 12, height = 8)
+ggplot(epic_as.ann.ord, aes(x=pos, y=minus_log10_Pvalue)) + 
+  geom_point(aes(colour=SUPER_PATHWAY, fill=SUPER_PATHWAY, shape=OR), size=3) + scale_shape_manual(values = c(25, 24), breaks = c("<1", ">1")) +
+    geom_hline(yintercept = 1.30103) + 
+    geom_hline(yintercept = 4.293282) + 
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank()) + 
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  geom_text_repel(data = subset(epic_as.ann.ord, p < 5.09e-05),
+    aes(label = xvar),
+    size = 3,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.3, "lines"))
+dev.off()
+
+# order by P-value again
+epic_as.ann.ord <- epic_as.ann.ord[order(epic_as.ann.ord$p), ] 
+
+epic_as.ann.ord$Significant <- ifelse(epic_as.ann.ord$p < 5.09e-05, "P < 5.09e-05", "Not Sig")
+epic_as.ann.ord$Significant <- as.factor(epic_as.ann.ord$Significant)
+epic_as.ann.ord$or <- as.numeric(epic_as.ann.ord$or)
+
+ggplot(epic_as.ann.ord, aes(x = or, y = -log10(p))) +
+  geom_point(aes(color = Significant)) +
+  scale_color_manual(values = c("grey", "red")) +
+  theme_bw(base_size = 12) + theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + 
+  geom_text_repel(
+    data = subset(epic_as.ann.ord, p < 5.09e-05),
+    aes(label = xvar),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.3, "lines")
+  )
+
+pdf(file = file.path(plots.dir, "volcano_EPIC_with_namesV1.pdf"),
+    width = 7, height = 8)
+ggplot(epic_as.ann.ord, aes(x = or, y = -log10(p))) +
+  geom_point(aes(color = Significant)) +
+  scale_color_manual(values = c("grey", "red")) +
+  theme_bw(base_size = 12) + theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + 
+  geom_text_repel(
+    data = subset(epic_as.ann.ord, p < 5.09e-05),
+    aes(label = xvar),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.3, "lines")
+  )
+dev.off()
+
+```
+
+## 2.5. Replication in MGBB-Asthma
+
+```{r 2.5.rep.mgbb_asthma_data}
+
+# Some metabolites have a * at the end, remove it if needed for plots, do the same for biobank metabolites too
+#epic_as$xvar <- gsub("[*]","" , epic_as$xvar ,ignore.case = TRUE)
+#metabolite_summary2$BIOCHEMICAL <- gsub("[*]","" , metabolite_summary2$BIOCHEMICAL,ignore.case = TRUE)
+
+# 607 metabolites by biochemical names overlap between EPIC and biobank metabolites, which could be used as background if we do pathway analyses for replicated metabolites (although we did not include this for the paper as it was few only and mostly annotated to steroid biosynthesis pathways)
+length(intersect(metabolite_summary2$BIOCHEMICAL, epic_as_batchfilter$xvar)) # 607
+
+# this updated file will be merged based on biochemical ids since that gives maximum overlap
+merged.metname.anno <- merge(metabolite_summary2, epic_as_batchfilter, by.x="BIOCHEMICAL", by.y="xvar", sort=F)
+
+# 25 metabolites overlap between significant EPIC metabolites and biobank QCed metabolites, we perform replication for these 25 in MGBB
+lap <- merge(metabolite_summary2, epic_as_batchfilter.sig, by.x="BIOCHEMICAL", by.y="xvar", sort=F)
+test.mets <- lap$met_ID
+final_data <- data.frame(final_data)
+rownames(final_data) <- final_data$Biobank.Subject.ID
+final_data.mets <- final_data[,colnames(final_data) %in% test.mets]
+
+##########################################################
+# Analysis: Asthma + No asthma~Metabolite
+##########################################################
+
+# Asthma vs no asthma + covars
+yname <- "ASTHMA"
+data <- final_data
+age <- as.numeric(final_data$Age)
+sex <- as.factor(final_data$Sex)
+race <- as.factor(final_data$RACE_cat)
+smoke <- as.factor(final_data$Smoking)
+bmi <- as.numeric(final_data$BMI)
+cols <- c(1:25)
+#cols <- c(95:100)
+table <- matrix(0, ncol=4, nrow=length(cols))
+dim(table)
+colnames(table) <- c("OR", "P", "2.5%", "97.5%")
+rownames(table) <- colnames(final_data.mets)[cols]
+for(i in 1:length(cols)){
+  m <- cols[i] ## table index
+  metabolite <- colnames(final_data.mets)[m] ## metabolite index
+  temp.formula <- as.formula(paste(yname, "~", metabolite, 
+                                   "+ age", "+ sex", "+ race", "+ bmi", "+ smoke", sep=""))
+  #print(temp.formula)
+  temp.glm <- glm(temp.formula, data=data, family="binomial")
+  temp.table <- coef(summary(temp.glm))
+  temp.ci<-confint(temp.glm)
+  table[i,] <- c(exp(temp.table[metabolite,"Estimate"]), 
+                 temp.table[metabolite,"Pr(>|z|)"],exp(temp.ci[metabolite,"2.5 %"]),
+                 exp(temp.ci[metabolite,"97.5 %"]))
+  table_adj <- cbind(data.frame(table), population=rep("adjusted", nrow(table))) 
+}
+
+rownames(metabolite_summary2) <- metabolite_summary2$met_ID
+table_ASTHMA<-merge(metabolite_summary2,table_adj, by.x = "met_ID", by.y = "row.names")
+
+table_ASTHMA_order<-table_ASTHMA[order(table_ASTHMA$P),]
+table_ASTHMA_order$sig[table_ASTHMA_order$P>0.05]<-0
+table_ASTHMA_order$sig[table_ASTHMA_order$P<=0.05]<-1
+table_ASTHMA_order$sig[table_ASTHMA_order$P<=0.01]<-2
+table_ASTHMA_order$sig[table_ASTHMA_order$P<=0.001]<-3
+table_ASTHMA_order$sig[table_ASTHMA_order$P<=0.0001]<-4
+table_ASTHMA_order$FDR <- p.adjust(table_ASTHMA_order$P, method="BH")
+dim(table_ASTHMA_order)
+table(table_ASTHMA_order$sig)
+
+table_ASTHMA_order_sig<-subset(table_ASTHMA_order, sig>=1)
+dim(table_ASTHMA_order_sig) # 17 metabolites replicated
+table1<-as.data.frame(table(table_ASTHMA_order_sig$SUB.PATHWAY))
+colnames(table1)<-c("pathway", "asthma")
+table1 <- table1[order(-table1$asthma),]
+head(table1);dim(table1)
+
+```
+
+## 2.5.1 Replication in MGBB-Asthma - Table 2
+
+```{r 2.5.1.rep.mgbb_asthma_data}
+
+#pb.asthma.sig <- table_ASTHMA_order_sig
+
+pb.epi.asthma.sig <- merge(table_ASTHMA_order_sig, epic_as_batchfilter.sig, by.x="BIOCHEMICAL", by.y="xvar", sort=F)
+
+pb.epi.asthma.sig<-pb.epi.asthma.sig[order(pb.epi.asthma.sig$p),]
+dim(pb.epi.asthma.sig)
+
+pb.epi.asthma.sig.sel=pb.epi.asthma.sig[,c("BIOCHEMICAL","SUPER.PATHWAY","SUB.PATHWAY",
+                      "P","OR","X2.5.","X97.5.","p","or","or_95l","or_95h"),drop=FALSE]
+
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 21364', 'steroid conjugate1*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 11440', 'pregnenetriol disulfate*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 24544', '17-hydroxypregnenolone sulfate*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 21470', '5-androstenetriol disulfate*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 11470', 'tetrahydrocorticosterone glucuronide*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 15492', 'steroid conjugate2*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+pb.epi.asthma.sig.sel$BIOCHEMICAL <- gsub('X - 24546', '16a-hydroxy-DHEA-disulfate*', pb.epi.asthma.sig.sel$BIOCHEMICAL)
+
+# shows results from Table 2
+DT::datatable(pb.epi.asthma.sig.sel, filter = 'top')
+
+```
+
+## 2.5.2 Replication in MGBB-Asthma - Figure 2
+
+```{r 2.5.2.rep.mgbb_asthma_figure2}
+
+setDT(pb.epi.asthma.sig.sel)
+pb.epic <- data.table::melt(pb.epi.asthma.sig.sel, id.vars=c("BIOCHEMICAL", "SUPER.PATHWAY", "SUB.PATHWAY"), measure.vars = list(OR = c('OR','or'),CI_U = c('X97.5.', 'or_95h'), CI_L = c('X2.5.','or_95l')))
+pb.epic.ord <- pb.epic[order(pb.epic$BIOCHEMICAL),]
+pb.epic.ord[, Dir_eff := case_when(OR > 1 ~ "TRUE", 
+OR <= 1 ~ "FALSE")]
+pb.epic.ord$Population[pb.epic.ord$variable==1]<-"MGBB-Asthma (n=610)"
+pb.epic.ord$Population[pb.epic.ord$variable==2]<-"EPIC-Norfolk (n=10,754)"
+
+pb.epic.ord$Sub_Pathway <- pb.epic.ord$SUB.PATHWAY
+pb.epic.ord$Sub_Pathway[pb.epic.ord$Sub_Pathway==""] = "Predicted_unknowns"
+
+fwrite(pb.epic.ord, file=here::here("code_review/results", 
+      paste0("epic_mgbb_17metabs_plotOrder_", timeStamp, ".csv")))
+
+# edit the order manually and re-read the same file (a version prior)
+pb.epic.ord <- fread(file=here::here("code_review/results/epic_mgbb_17metabs_plotOrder_1628779428_mod.csv"))
+
+pb.ord <- pb.epic.ord[pb.epic.ord$variable==1,]
+epic.ord <- pb.epic.ord[pb.epic.ord$variable==2,]
+pb.ord <- data.table(pb.ord)
+
+pb.ord$BIOCHEMICAL.ord <- factor(pb.ord$BIOCHEMICAL, levels = rev(pb.ord$BIOCHEMICAL))
+epic.ord$BIOCHEMICAL.ord <- factor(epic.ord$BIOCHEMICAL, levels = rev(epic.ord$BIOCHEMICAL))
+
+ggplot(epic.ord, aes(x = BIOCHEMICAL.ord, y = OR, col=Sub_Pathway, group=Sub_Pathway, fill=Sub_Pathway)) + facet_grid(. ~ Population) + 
+    geom_errorbar(aes(ymin = CI_L, ymax = CI_U), width = 0.25) +
+    geom_pointrange(aes(y=OR, ymin = CI_L, ymax = CI_U), size = 0.5) +
+    geom_hline(yintercept = 1, linetype = 2) + ylim(0.20, 1) + 
+    labs(title = "", 
+         x = "Metabolite associations", y = "Odds Ratio (95% Confidence Interval)") + 
+    theme(title = element_text(size = 12), 
+          strip.text.x = element_text(size = 12),
+          axis.title.x = element_text(size = 10),
+          axis.text.x = element_text(size = 10),
+          axis.title.y = element_text(size = 10),
+          axis.text.y = element_text(size = 10),
+          legend.position = c(0.25, 0.7),
+          legend.title = element_text(size = 7),
+          legend.text = element_text(size = 7)) + coord_flip()
+
+ggsave("../code_review/plots/OR_effect_plot17metabs_epic.png", width = 6, height = 6)
+# ggsave(file="../code_review/plots/OR_effect_plot17metabs_epic.eps", device="eps")
+
+ggplot(pb.ord, aes(x = BIOCHEMICAL.ord, y = OR, col=Sub_Pathway, group=Sub_Pathway, fill=Sub_Pathway)) + facet_grid(. ~ Population) + 
+    geom_errorbar(aes(ymin = CI_L, ymax = CI_U), width = 0.25) +
+    geom_pointrange(aes(y=OR, ymin = CI_L, ymax = CI_U), size = 0.5) +
+    geom_hline(yintercept = 1, linetype = 2) + ylim(0.20, 1) + 
+    labs(title = "", 
+         x = "", y = "Odds Ratio (95% Confidence Interval)") + 
+    theme(title = element_text(size = 12), 
+          strip.text.x = element_text(size = 12),
+          axis.title.x = element_text(size = 10),
+          axis.text.x = element_text(size = 10),
+          axis.title.y = element_text(size = 10),
+          axis.text.y = element_blank(), 
+          legend.position = "none",
+          legend.title = element_blank(),
+          legend.text = element_blank()) + coord_flip()
+
+ggsave("../code_review/plots/OR_effect_plot17metabs_mgbb.png", width = 3, height = 6)
+# ggsave(file="../code_review/plots/OR_effect_plot17metabs_mgbb.eps", device="eps")
+
+```
+
+# 3. Save MBGG-Asthma results
+
+```{r 3.save_results}
+
+#####################
+# before filtering
+#####################
+fwrite(epi_t, file=here::here(results.dir, 
+      paste0("pheno_samples_MGBB_processed_", timeStamp, ".csv")))
+
+fwrite(sample_missingness, file=here::here(results.dir,
+ paste0("sample_missingness_MGBB_", timeStamp, ".csv")))
+
+fwrite(metabolite_missingness, file=here::here(results.dir,
+ paste0("metabolite_missingness_MGBB_", timeStamp, ".csv")))
+
+fwrite(metabolite_summary, file=here::here(results.dir,
+ paste0("metaboliteSummary_PB_info_QCdetails_", timeStamp, ".csv")))
+
+#####################
+# after filtering
+#####################
+
+fwrite(metabolite_summary2,file=here::here(results.dir,
+ paste0("metaboliteSummary_MGBB_info_postprocessing_", timeStamp, ".csv")))
+
+fwrite(pca_epi, file=here::here(results.dir,
+ paste0("10PCs_sampl_info_MGBB_postprocess_", timeStamp, ".csv")))
+
+####################################################
+# After metabolite level and sample level filtering
+####################################################
+
+fwrite(mets_final3, file=here::here(results.dir,
+ paste0("samp_mets_final3_processed_", timeStamp, ".csv")))
+
+save(mets_data, phenoMGBB, metabolite_summary2, final_data, file=file.path(results.dir,paste0("samp_mets_final_processed_with_pheno_MGBBA_", timeStamp, ".RData")))
+
+write.table(final_data, file.path(results.dir, 
+      paste0("samp_final_processed_MGBBA_", timeStamp, ".txt")),
+            sep="\t", quote=F, row.names=F)
+
+############################
+# Saving EPIC-Norfolk metabs
+############################
+write.table(epic_as, file.path(results.dir, 
+            "epic_asthma_prev_all_metabs.txt"),
+            sep="\t", row.names=FALSE)
+
+write.table(epic_named, file.path(results.dir, 
+            "epic_asthma_prev_all_metabs_named.txt"),
+            sep="\t", row.names=FALSE)
+
+# Background list of metabolites (not needed for paper now)
+
+write.table(merged.metname.anno, file.path(results.dir, 
+            "merged_metabs_epic_MGBB_asthma_prev_by_names.txt"),
+            sep="\t", quote=F, row.names=FALSE)
+
+#######################################################
+# results from model for 25 metabolites in MGBB-Asthma
+#######################################################
+write.table(table_ASTHMA_order, file.path(results.dir, 
+      paste0("metabolites25_asthma_outcome_glm_MGBBA_", timeStamp, ".txt")),
+            sep="\t", quote=F, row.names=F)
+
+write.table(table1, file.path(results.dir, 
+      paste0("enriched_pathways25_asthma_outcome_MGBBA_", timeStamp, ".txt")),
+            sep="\t", quote=F, row.names=F)
+
+```
+
+> Link to Biobank files [access restricted link](https://www.dropbox.com/home/Asthma/Cleaned_Generated_Files/Asthma_Paper_Files).
+
+> Link to code for variables created before 1st plasma date - eosinophils, IgE and oral corticosteroid data [also access restricted link](https://www.dropbox.com/sh/byptc6eji6glbbx/AABYynZl3quMoMKzP_Qo03Nta?dl=0).
+
+> Link to code for variables created before 1st plasma date - eosinophils, IgE and oral corticosteroid data [also access restricted link by folder name](https://www.dropbox.com/home/pegasus2_selection/scripts).
+
+```
+# 4. Session info
+
+```{r 4.session_info}
+
+sessionInfo()
+
+```
